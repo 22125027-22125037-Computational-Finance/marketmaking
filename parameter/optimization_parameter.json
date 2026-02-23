@@ -1,0 +1,5 @@
+{
+    "random_seed": 2025,
+    "no_trials": 100,
+    "step": [1, 5]
+}
