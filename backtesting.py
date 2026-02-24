@@ -14,6 +14,10 @@ from config.config import BACKTESTING_CONFIG
 from metrics.metric import get_returns, Metric
 from utils import get_expired_dates, from_cash_to_tradeable_contracts, round_decimal
 
+from datetime import timedelta, time
+from collections import deque
+
+
 FEE_PER_CONTRACT = Decimal(BACKTESTING_CONFIG["fee"]) * Decimal('100')
 
 
@@ -60,6 +64,9 @@ class Backtesting:
 
         # THÊM MỚI: Cửa sổ lưu trữ 20 ticks gần nhất
         self.tick_window = deque(maxlen=20)
+        # THÊM MỚI: Theo dõi Win Rate
+        self.trade_results = []
+
 
     def move_f1_to_f2(self, f1_price, f2_price):
         """
@@ -97,6 +104,29 @@ class Backtesting:
         self.daily_returns.append(new_asset / self.daily_assets[-1] - 1)
         self.daily_assets.append(new_asset)
 
+    def close_all_positions(self, price: Decimal, reason=""):
+        """Đóng tất cả hợp đồng hiện có và ghi nhận PnL"""
+        if self.inventory != 0:
+            sign = 1 if self.inventory > 0 else -1
+            trade_pnl = sign * (price - self.inventory_price) # Tính bằng điểm
+            
+            # Ghi nhận thắng/thua cho Win Rate
+            self.trade_results.append(1 if trade_pnl > Decimal('0') else 0)
+            
+            # Ghi nhận lỗ/lãi vào tài khoản (ac_loss)
+            if self.inventory > 0:
+                self.ac_loss += (self.inventory_price - price) * Decimal('100')
+            else:
+                self.ac_loss += (price - self.inventory_price) * Decimal('100')
+                
+            self.ac_loss += FEE_PER_CONTRACT * abs(self.inventory)
+            
+            # Reset vị thế
+            self.inventory = 0
+            self.inventory_price = Decimal('0')
+            # Nếu muốn xem chi tiết, bỏ comment dòng dưới:
+            # print(f"[{reason}] Đóng lệnh tại {price}")
+
     def handle_force_sell(self, price: Decimal):
         """
         Handle force sell
@@ -127,68 +157,64 @@ class Backtesting:
         )
         return total_placeable - abs(self.inventory)
 
-    def handle_matched_order(self, price):
-        """
-        Handle matched order
-
-        Args:
-            price (_type_): _description_
-        """
+    def handle_matched_order(self, price: Decimal):
         matched = 0
+        order_size = 2 # Trade 02 contracts per side 
         placeable = self.get_maximum_placeable(price)
+
         if self.bid_price is None or self.ask_price is None:
             return matched
 
-        if self.bid_price >= price and self.inventory >= 0 and placeable > 0:
-            self.inventory_price = (
-                self.inventory_price * abs(self.inventory) + price
-            ) / (abs(self.inventory) + 1)
-            self.inventory += 1
-            matched += 1
+        # Khớp lệnh MUA
+        if self.bid_price >= price and self.inventory >= 0 and placeable >= order_size:
+            self.inventory_price = (self.inventory_price * abs(self.inventory) + price * order_size) / (abs(self.inventory) + order_size)
+            self.inventory += order_size
+            matched += order_size
         elif self.bid_price >= price and self.inventory < 0:
-            self.ac_loss += (FEE_PER_CONTRACT - (self.inventory_price - price) * Decimal('100'))
-            self.inventory += 1
-            matched -= 1
+            # Mua để đóng vị thế Bán (Cover Short)
+            trade_pnl = self.inventory_price - price
+            self.trade_results.append(1 if trade_pnl > 0 else 0)
+            self.ac_loss += (FEE_PER_CONTRACT * order_size - trade_pnl * Decimal('100') * order_size)
+            self.inventory += order_size
+            matched -= order_size
 
-        if self.ask_price <= price and self.inventory <= 0 and placeable > 0:
-            self.inventory_price = (
-                self.inventory_price * abs(self.inventory) + price
-            ) / (abs(self.inventory) + 1)
-            self.inventory -= 1
-            matched += 1
+        # Khớp lệnh BÁN
+        if self.ask_price <= price and self.inventory <= 0 and placeable >= order_size:
+            self.inventory_price = (self.inventory_price * abs(self.inventory) + price * order_size) / (abs(self.inventory) + order_size)
+            self.inventory -= order_size
+            matched += order_size
         elif self.ask_price <= price and self.inventory > 0:
-            self.ac_loss += (FEE_PER_CONTRACT - (price - self.inventory_price) * Decimal('100'))
-            self.inventory -= 1
-            matched -= 1
+            # Bán để đóng vị thế Mua (Close Long)
+            trade_pnl = price - self.inventory_price
+            self.trade_results.append(1 if trade_pnl > 0 else 0)
+            self.ac_loss += (FEE_PER_CONTRACT * order_size - trade_pnl * Decimal('100') * order_size)
+            self.inventory -= order_size
+            matched -= order_size
 
         return matched
 
-    def update_bid_ask(self, current_price: Decimal, reference_price: Decimal, step, timestamp):
-        """
-        Placing bid ask formula based on SMA 20 reference price
-        """
-        # Khớp lệnh dựa trên giá thị trường hiện tại
+    def update_bid_ask(self, current_price: Decimal, timestamp):
+        # Khớp các lệnh đang chờ
         matched = self.handle_matched_order(current_price)
 
-        if self.old_timestamp is None or timestamp > self.old_timestamp + timedelta(
-            seconds=int(BACKTESTING_CONFIG["time"])
-        ):
-            self.old_timestamp = timestamp
-            # Đặt lệnh mới dựa trên giá trị tham chiếu (SMA 20)
-            self.bid_price = (
-                reference_price - step * Decimal(max(self.inventory, 0) * 0.02 + 1)
-            ).quantize(Decimal("0.0"), rounding=ROUND_HALF_UP)
-            self.ask_price = (
-                reference_price - step * Decimal(min(self.inventory, 0) * 0.02 - 1)
-            ).quantize(Decimal("0.0"), rounding=ROUND_HALF_UP)
-        elif matched != 0:
-            # Cập nhật lại lệnh nếu vừa khớp lệnh xong
-            self.bid_price = (
-                reference_price - step * Decimal(max(self.inventory, 0) * 0.02 + 1)
-            ).quantize(Decimal("0.0"), rounding=ROUND_HALF_UP)
-            self.ask_price = (
-                reference_price - step * Decimal(min(self.inventory, 0) * 0.02 - 1)
-            ).quantize(Decimal("0.0"), rounding=ROUND_HALF_UP)
+        # Tính toán FairPrice và PriceRange nếu đủ 20 ticks 
+        if len(self.tick_window) == 20:
+            fair_price = sum(self.tick_window) / Decimal('20')
+            price_max = max(self.tick_window)
+            price_min = min(self.tick_window)
+            price_range = price_max - price_min
+            
+            # Condition: PriceRange < 0.2% của FairPrice 
+            sideways_threshold = fair_price * Decimal('0.002')
+            
+            if price_range < sideways_threshold:
+                # Place Limit Buy at FairPrice - 0.5 and Limit Sell at FairPrice + 0.5 
+                self.bid_price = (fair_price - Decimal('0.5')).quantize(Decimal("0.0"))
+                self.ask_price = (fair_price + Decimal('0.5')).quantize(Decimal("0.0"))
+            else:
+                # Thị trường có trend -> Hủy lệnh chờ
+                self.bid_price = None
+                self.ask_price = None
 
     @staticmethod
     def process_data(evaluation=False):
@@ -250,6 +276,8 @@ class Backtesting:
         for index, row in data.iterrows():
             self.cur_date = row["datetime"]
             self.ticker = row["tickersymbol"]
+            current_time = self.cur_date.time() # Lấy giờ hiện tại của tick
+            
             if (
                 cur_index != len(trading_dates) - 1
                 and not expiration_dates.empty()
@@ -259,26 +287,48 @@ class Backtesting:
                 expiration_dates.get()
                 moving_to_f2 = True
 
-            # Lấy giá trị của tick hiện tại
-            current_tick_price = row["f2_price"] if moving_to_f2 else row["price"]
-            
-            # THÊM MỚI: Thêm giá vào window để tính SMA 20
+            current_tick_price = Decimal(str(row["f2_price"] if moving_to_f2 else row["price"]))
             self.tick_window.append(current_tick_price)
-            
-            # Tính SMA. Nếu chưa đủ 20 ticks thì lấy trung bình của số lượng hiện có
-            sma_20 = sum(self.tick_window) / Decimal(len(self.tick_window))
 
-            self.handle_force_sell(current_tick_price)
-            
-            # THÊM MỚI: Truyền cả giá hiện tại và SMA 20 vào hàm
-            self.update_bid_ask(
-                current_price=current_tick_price, 
-                reference_price=sma_20, 
-                step=step, 
-                timestamp=row["datetime"]
-            )
+            # --- KIỂM TRA ĐIỀU KIỆN ĐÓNG LỆNH ATC LÚC 14:30 --- 
+            if current_time >= time(14, 30):
+                if self.inventory != 0:
+                    self.close_all_positions(current_tick_price, reason="ATC 14:30")
+                self.bid_price = None
+                self.ask_price = None
+            else:
+                # --- KIỂM TRA STOP-LOSS -2 ĐIỂM --- 
+                if self.inventory != 0:
+                    sign = 1 if self.inventory > 0 else -1
+                    unrealized_pnl = sign * (current_tick_price - self.inventory_price)
+                    if unrealized_pnl <= Decimal('-2.0'):
+                        self.close_all_positions(current_tick_price, reason="Stop-loss -2 điểm")
+                        
+                # Cập nhật Quotes
+                self.handle_force_sell(current_tick_price)
+                self.update_bid_ask(current_price=current_tick_price, timestamp=row["datetime"])
 
-            # ... [Phần code bên dưới của hàm run giữ nguyên] ...
+            # Cập nhật cuối ngày
+            if index == len(data) - 1 or row["date"] != data.iloc[index + 1]["date"]:
+                cur_index += 1
+                
+                # Cập nhật PnL cuối ngày
+                close_price = Decimal(str(row["f2_close"] if moving_to_f2 else row["close"]))
+                self.update_pnl(close_price)
+                
+                if self.printable:
+                    print(f"Realized asset {row['date']}: {int(self.daily_assets[-1] * Decimal('1000'))} VND")
+                
+                # Reset biến cho ngày mới [cite: 43]
+                moving_to_f2 = False
+                self.ac_loss = Decimal("0.0")
+                self.bid_price = None
+                self.ask_price = None
+                self.old_timestamp = None
+                self.tick_window.clear() # Xóa lịch sử ticks qua đêm
+
+                self.tracking_dates.append(row["date"])
+                self.daily_inventory.append(self.inventory)
 
         self.metric = Metric(self.daily_returns, None)
 
@@ -370,6 +420,14 @@ if __name__ == "__main__":
     print(f"HPR {bt.metric.hpr()}")
     print(f"Monthly return {returns['monthly_return']}")
     print(f"Annual return {returns['annual_return']}")
+
+
+    # Tính toán và In Win Rate
+    if len(bt.trade_results) > 0:
+        win_rate = sum(bt.trade_results) / len(bt.trade_results) * 100
+        print(f"Win Rate: {win_rate:.2f}% (Tổng số lệnh chốt: {len(bt.trade_results)})")
+    else:
+        print("Win Rate: 0% (Không có lệnh nào được khớp)")
 
     bt.plot_hpr()
     bt.plot_drawdown()
