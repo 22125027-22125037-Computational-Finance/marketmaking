@@ -1,7 +1,7 @@
 """
 This is main module for strategy backtesting
 """
-
+import os
 import numpy as np
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -319,7 +319,11 @@ class Backtesting:
                 if self.printable:
                     print(f"Realized asset {row['date']}: {int(self.daily_assets[-1] * Decimal('1000'))} VND")
                 
-                # Reset biến cho ngày mới [cite: 43]
+                # THÊM VÀO ĐÂY: Lưu lại tài sản nếu hôm đó là ngày đáo hạn
+                if moving_to_f2:
+                    self.monthly_tracking.append([row["date"], self.daily_assets[-1]])
+                
+                # Reset biến cho ngày mới
                 moving_to_f2 = False
                 self.ac_loss = Decimal("0.0")
                 self.bid_price = None
@@ -415,7 +419,12 @@ if __name__ == "__main__":
     print(f"Maximum drawdown: {mdd}")
 
     monthly_df = pd.DataFrame(bt.monthly_tracking, columns=["date", "asset"])
-    returns = get_returns(monthly_df)
+    if len(monthly_df) > 0:
+        returns = get_returns(monthly_df)
+        print(f"Monthly return {returns['monthly_return']}")
+        print(f"Annual return {returns['annual_return']}")
+    else:
+        print("Không đủ dữ liệu đáo hạn để tính Monthly/Annual return.")
 
     print(f"HPR {bt.metric.hpr()}")
     print(f"Monthly return {returns['monthly_return']}")
@@ -428,6 +437,10 @@ if __name__ == "__main__":
         print(f"Win Rate: {win_rate:.2f}% (Tổng số lệnh chốt: {len(bt.trade_results)})")
     else:
         print("Win Rate: 0% (Không có lệnh nào được khớp)")
+
+    # THÊM MỚI: Tự động tạo thư mục chứa ảnh nếu chưa có
+    os.makedirs("result/backtest", exist_ok=True)
+
 
     bt.plot_hpr()
     bt.plot_drawdown()
