@@ -105,7 +105,7 @@ class Backtesting:
         self.daily_assets.append(new_asset)
 
     def close_all_positions(self, price: Decimal, reason=""):
-        """Đóng tất cả hợp đồng hiện có và ghi nhận PnL"""
+        """Đóng tất cả hợp đồng hiện có và ghi nhận PnL chuẩn xác"""
         if self.inventory != 0:
             sign = 1 if self.inventory > 0 else -1
             trade_pnl = sign * (price - self.inventory_price) # Tính bằng điểm
@@ -113,19 +113,20 @@ class Backtesting:
             # Ghi nhận thắng/thua cho Win Rate
             self.trade_results.append(1 if trade_pnl > Decimal('0') else 0)
             
-            # Ghi nhận lỗ/lãi vào tài khoản (ac_loss)
+            # SỬA LỖI Ở ĐÂY: Lấy số lượng hợp đồng hiện có
+            qty = Decimal(str(abs(self.inventory)))
+            
+            # Ghi nhận lỗ/lãi vào tài khoản (ac_loss) NHÂN VỚI SỐ LƯỢNG
             if self.inventory > 0:
-                self.ac_loss += (self.inventory_price - price) * Decimal('100')
+                self.ac_loss += (self.inventory_price - price) * Decimal('100') * qty
             else:
-                self.ac_loss += (price - self.inventory_price) * Decimal('100')
+                self.ac_loss += (price - self.inventory_price) * Decimal('100') * qty
                 
-            self.ac_loss += FEE_PER_CONTRACT * abs(self.inventory)
+            self.ac_loss += FEE_PER_CONTRACT * qty
             
             # Reset vị thế
             self.inventory = 0
             self.inventory_price = Decimal('0')
-            # Nếu muốn xem chi tiết, bỏ comment dòng dưới:
-            # print(f"[{reason}] Đóng lệnh tại {price}")
 
     def handle_force_sell(self, price: Decimal):
         """
@@ -141,21 +142,23 @@ class Backtesting:
 
     def get_maximum_placeable(self, inst_price: Decimal):
         """
-        Get maximum placeable
-
-        Args:
-            inst_price (Decimal): _description_
-
-        Returns:
-            _type_: _description_
+        Get maximum placeable (Hard cap at 2 contracts)
         """
-        total_placeable = max(
+        MAX_CONTRACTS = 2 # Giới hạn tuyệt đối theo Hypothesis
+        
+        # Sức mua dựa trên tiền mặt
+        cash_placeable = max(
             from_cash_to_tradeable_contracts(
                 self.daily_assets[-1] - self.ac_loss, inst_price
             ),
             0,
         )
-        return total_placeable - abs(self.inventory)
+        
+        # Số hợp đồng được phép đánh thêm để không vượt trần
+        allowed_by_risk = MAX_CONTRACTS - abs(self.inventory)
+        
+        # Trả về con số nhỏ hơn giữa sức mua tiền mặt và giới hạn rủi ro
+        return min(cash_placeable, allowed_by_risk)
 
     def handle_matched_order(self, price: Decimal):
         matched = 0
