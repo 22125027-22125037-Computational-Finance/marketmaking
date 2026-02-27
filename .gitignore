@@ -2,3 +2,10 @@ data/is/teacher's data/VN30F1M_data.csv
 data/is/teacher's data/VN30F2M_data.csv
 data/os/teacher's data/VN30F1M_data.csv
 data/os/teacher's data/VN30F2M_data.csv
+.venv
+.vscode
+__pycache__
+data/is/VN30F1M_data.csv
+data/is/VN30F2M_data.csv
+data/os/VN30F1M_data.csv
+data/os/VN30F2M_data.csv
