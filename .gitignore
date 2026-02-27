@@ -20,3 +20,6 @@ result/backtest/inventory.svg
 result/backtest/hpr.svg
 result/backtest/drawdown.svg
 config/__pycache__/config.cpython-314.pyc
+result/backtest/drawdown.svg
+result/backtest/hpr.svg
+result/backtest/inventory.svg
