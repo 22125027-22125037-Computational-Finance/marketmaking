@@ -52,7 +52,7 @@ class Metric:
     def hpr(self) -> Decimal:
         return (np.cumprod(1 + np.array(self.period_returns)) - 1)[-1]
 
-    def sharpe_ratio(self, risk_free_return: Decimal) -> Decimal:
+    def sharpe_ratio(self, risk_free_return: Decimal = Decimal("0")) -> Decimal:
         """
         Calculate sharpe ratio
 
@@ -65,17 +65,15 @@ class Metric:
         Returns:
             Decimal
         """
-        if not self.period_returns:
-            raise ValueError('Annual returns should not be None or empty')
+        if not self.period_returns or len(self.period_returns) < 2:
+            return Decimal("0")
+        excess_returns = [r - risk_free_return for r in self.period_returns]
+        std = np.std(self.period_returns, ddof=1)
+        if std == 0:
+            return Decimal("0")
+        return Decimal(str(np.mean(excess_returns) / std))
 
-        # Calculate excess returns
-        excess_returns = [
-            period_return - risk_free_return for period_return in self.period_returns
-        ]
-
-        return np.mean(excess_returns) / np.std(self.period_returns, ddof=1)
-
-    def sortino_ratio(self, risk_free_return: Decimal) -> Decimal:
+    def sortino_ratio(self, risk_free_return: Decimal = Decimal("0")) -> Decimal:
         """
         Calculate sortino ratio
 
@@ -89,15 +87,15 @@ class Metric:
             Decimal: _description_
         """
         if not self.period_returns:
-            raise ValueError('Annual returns should not be None or empty')
-
-        downside_returns = [
-            min(0, period_return - risk_free_return)
-            for period_return in self.period_returns
-        ]
-        downside_risk = np.sqrt(np.mean([d_r**2 for d_r in downside_returns]))
-
-        return (np.mean(self.period_returns) - risk_free_return) / downside_risk
+            return Decimal("0")
+        excess_returns = [r - risk_free_return for r in self.period_returns]
+        downside = [r for r in self.period_returns if r < 0]
+        if len(downside) == 0:
+            return Decimal("0")
+        downside_std = np.std(downside, ddof=1) if len(downside) > 1 else 0
+        if downside_std == 0:
+            return Decimal("0")
+        return Decimal(str(np.mean(excess_returns) / downside_std))
 
     def maximum_drawdown(self) -> Decimal:
         """
