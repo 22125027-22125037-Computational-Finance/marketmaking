@@ -23,3 +23,6 @@ config/__pycache__/config.cpython-314.pyc
 result/backtest/drawdown.svg
 result/backtest/hpr.svg
 result/backtest/inventory.svg
+log.txt
+metrics/__pycache__/metric.cpython-39.pyc
+metrics/__pycache__/metric.cpython-39.pyc

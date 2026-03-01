@@ -46,7 +46,13 @@ class Backtesting:
         self.transactions = []
         self.order_logs = []
 
-        self.tick_window = deque(maxlen=20)
+        self.tick_window = deque(maxlen=100)
+        # THAM SỐ TỐI ƯU MỚI:
+        self.window_size = 60          # Cửa sổ tính SMA mượt hơn
+        self.max_contracts = 3          # Tăng số lượng để bù đắp chi phí vận hành
+        self.order_size = 1
+
+
         self.trade_results = []
 
         # --- CÁC THAM SỐ ĐÃ TỐI ƯU ---
@@ -71,12 +77,12 @@ class Backtesting:
         self.start_trade_time = time(9, 20)      # Bắt đầu muộn hơn 5p để tránh nhiễu đầu giờ
         self.end_trade_time = time(14, 20)        # Kết thúc sớm hơn để tránh biến động cuối giờ
 
-        self.max_contracts = 2
+        self.max_contracts = 5
         self.order_size = 1
 
         # Nới Stop-loss và tăng Take-profit để bù đắp chi phí giao dịch
-        self.stop_loss_points = Decimal("-2.0")  
-        self.take_profit_points = Decimal("2.5")
+        self.stop_loss_points = Decimal("-1.2")
+        self.take_profit_points = Decimal("1.5")
 
     def move_f1_to_f2(self, f1_price, f2_price):
         if self.inventory > 0:
@@ -150,13 +156,18 @@ class Backtesting:
         if self.bid_price is None and self.ask_price is None:
             return matched
 
+        # Quy đổi 1 điểm = 100.000 VND (Hệ số 100 trong code của bạn tương ứng unit=1000VND)
+        # Lợi nhuận thuần = (Giá bán - Giá mua) * 100 - Phí [cite: 1]
+        
         if self.bid_price is not None and price <= self.bid_price:
             fill_price = self.bid_price
-            if self.inventory < 0:
-                trade_pnl = self.inventory_price - fill_price
-                self.trade_results.append(1 if trade_pnl > 0 else 0)
-                self.ac_loss += (FEE_PER_CONTRACT * order_size -
-                                 trade_pnl * Decimal("100") * order_size)
+            if self.inventory < 0: # Đang Short, khớp Bid để cover
+                trade_pnl_points = self.inventory_price - fill_price
+                # CHỈ TÍNH LÀ WIN KHI LÃI > PHÍ 
+                net_gain = (trade_pnl_points * Decimal("100")) - FEE_PER_CONTRACT 
+                self.trade_results.append(1 if net_gain > 0 else 0)
+                
+                self.ac_loss -= net_gain * order_size
                 self.inventory += order_size
                 matched -= order_size
             elif self.inventory == 0 and placeable >= order_size:
@@ -164,15 +175,16 @@ class Backtesting:
                 self.inventory += order_size
                 self.ac_loss += FEE_PER_CONTRACT * order_size
                 matched += order_size
-            self.bid_price = None # Lệnh đã khớp, xóa lệnh chờ
+            self.bid_price = None
 
         elif self.ask_price is not None and price >= self.ask_price:
             fill_price = self.ask_price
-            if self.inventory > 0:
-                trade_pnl = fill_price - self.inventory_price
-                self.trade_results.append(1 if trade_pnl > 0 else 0)
-                self.ac_loss += (FEE_PER_CONTRACT * order_size -
-                                 trade_pnl * Decimal("100") * order_size)
+            if self.inventory > 0: # Đang Long, khớp Ask để chốt
+                trade_pnl_points = fill_price - self.inventory_price
+                net_gain = (trade_pnl_points * Decimal("100")) - FEE_PER_CONTRACT
+                self.trade_results.append(1 if net_gain > 0 else 0)
+                
+                self.ac_loss -= net_gain * order_size
                 self.inventory -= order_size
                 matched -= order_size
             elif self.inventory == 0 and placeable >= order_size:
@@ -180,62 +192,41 @@ class Backtesting:
                 self.inventory -= order_size
                 self.ac_loss += FEE_PER_CONTRACT * order_size
                 matched += order_size
-            self.ask_price = None # Lệnh đã khớp, xóa lệnh chờ
+            self.ask_price = None
 
         return matched
 
     def update_bid_ask(self, current_price: Decimal, timestamp=None):
         self.handle_matched_order(current_price)
+        if len(self.tick_window) < self.window_size:
+            return
 
-        if self.tick_count - self.last_flat_tick < self.cooldown_ticks:
+        prices = [float(x) for x in self.tick_window]
+        fair_price = Decimal(str(np.mean(prices)))
+        price_std = Decimal(str(np.std(prices)))
+
+        # 1. Tăng khoảng cách đặt lệnh để lọc nhiễu và bù phí
+        vol_offset = max(Decimal("0.9"), price_std * Decimal("1.1")) # Tăng từ 0.6 lên 0.9
+
+        # 2. Xác định xu hướng mượt hơn (SMA ngắn hạn vs dài hạn)
+        # Thay vì dùng current_price, ta dùng trung bình 5 ticks gần nhất
+        recent_avg = Decimal(str(np.mean(prices[-5:])))
+        trend_up = recent_avg > fair_price
+        
+        skew = Decimal(str(self.inventory)) * Decimal("0.6") # Skew mạnh hơn để thoát hàng
+        
+        # 3. Chỉ vào lệnh khi Spread đủ lớn để ăn lãi thực sự
+        if self.inventory < self.max_contracts and trend_up:
+            # Chỉ mua khi giá lùi sâu xuống dưới SMA trong một xu hướng tăng (Buy the dip)
+            self.bid_price = (fair_price - skew - vol_offset).quantize(Decimal("0.1"))
+        else:
             self.bid_price = None
+
+        if self.inventory > -self.max_contracts and not trend_up:
+            # Chỉ bán khi giá hồi lên trên SMA trong một xu hướng giảm (Sell the rally)
+            self.ask_price = (fair_price - skew + vol_offset).quantize(Decimal("0.1"))
+        else:
             self.ask_price = None
-            return
-
-        if self.inventory != 0:
-            return
-
-        if len(self.tick_window) == 20:
-            fair_price = sum(self.tick_window) / Decimal("20")
-            price_range = max(self.tick_window) - min(self.tick_window)
-
-            sideways_threshold = fair_price * self.sideways_pct
-            required_edge = max(self.entry_band, self.min_edge_after_fee)
-            mispricing = current_price - fair_price
-
-            # Chỉ đặt lệnh khi thị trường đi ngang thực sự
-            if price_range <= sideways_threshold:
-                placeable = self.get_maximum_placeable(current_price)
-                order_size = self.order_size
-
-                # LONG signal
-                if mispricing <= -required_edge:
-                    self.signal_count += 1
-                    if self.force_entry_on_signal and self.inventory == 0 and placeable >= order_size:
-                        self.inventory = order_size
-                        self.inventory_price = current_price
-                        self.ac_loss += FEE_PER_CONTRACT * Decimal(order_size)
-                        self.entry_count += 1
-                        return
-                    # Chế độ Passive: Đặt lệnh chờ Bid
-                    self.bid_price = (current_price - self.quote_offset).quantize(Decimal("0.0"))
-                    self.ask_price = None
-
-                # SHORT signal
-                elif mispricing >= required_edge:
-                    self.signal_count += 1
-                    if self.force_entry_on_signal and self.inventory == 0 and placeable >= order_size:
-                        self.inventory = -order_size
-                        self.inventory_price = current_price
-                        self.ac_loss += FEE_PER_CONTRACT * Decimal(order_size)
-                        self.entry_count += 1
-                        return
-                    # Chế độ Passive: Đặt lệnh chờ Ask
-                    self.ask_price = (current_price + self.quote_offset).quantize(Decimal("0.0"))
-                    self.bid_price = None
-            else:
-                self.bid_price = None
-                self.ask_price = None
 
     @staticmethod
     def process_data(evaluation=False):
