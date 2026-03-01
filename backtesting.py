@@ -48,7 +48,7 @@ class Backtesting:
 
         self.tick_window = deque(maxlen=100)
         # THAM SỐ TỐI ƯU MỚI:
-        #self.window_size = 80          # Cửa sổ tính SMA mượt hơn
+        self.window_size = 20          # Cửa sổ tính SMA mượt hơn
         self.max_contracts = 2          # Tăng số lượng để bù đắp chi phí vận hành
         self.order_size = 1
 
@@ -154,22 +154,40 @@ class Backtesting:
         if self.bid_price is None or self.ask_price is None:
             return matched
 
-        # Khớp lệnh Bid (Mua)
+        # -----------------------------------------
+        # 1. Khớp lệnh Bid (Chúng ta đang MUA vào)
+        # -----------------------------------------
         if self.bid_price >= price and self.inventory >= 0 and placeable > 0:
+            # Đang rỗng hoặc ôm Long -> Mở/Nhồi thêm Long
             self.inventory_price = (self.inventory_price * abs(self.inventory) + price) / (abs(self.inventory) + 1)
             self.inventory += 1
             matched += 1
+            
         elif self.bid_price >= price and self.inventory < 0:
+            # Đang ôm Short -> Khớp lệnh Mua nghĩa là ĐÓNG SHORT (Chốt vị thế)
+            # Tính PnL cho 1 hợp đồng (Bán cao - Mua thấp) trừ đi phí 2 chiều
+            trade_pnl = (self.inventory_price - price) * Decimal('100') - (FEE_PER_CONTRACT * 2)
+            self.trade_results.append(1 if trade_pnl > Decimal('0') else 0) # Ghi nhận Thắng/Thua
+            
             self.ac_loss += (FEE_PER_CONTRACT - (self.inventory_price - price) * Decimal('100'))
             self.inventory += 1
             matched -= 1
 
-        # Khớp lệnh Ask (Bán)
+        # -----------------------------------------
+        # 2. Khớp lệnh Ask (Chúng ta đang BÁN ra)
+        # -----------------------------------------
         if self.ask_price <= price and self.inventory <= 0 and placeable > 0:
+            # Đang rỗng hoặc ôm Short -> Mở/Nhồi thêm Short
             self.inventory_price = (self.inventory_price * abs(self.inventory) + price) / (abs(self.inventory) + 1)
             self.inventory -= 1
             matched += 1
+            
         elif self.ask_price <= price and self.inventory > 0:
+            # Đang ôm Long -> Khớp lệnh Bán nghĩa là ĐÓNG LONG (Chốt vị thế)
+            # Tính PnL cho 1 hợp đồng (Bán cao - Mua thấp) trừ đi phí 2 chiều
+            trade_pnl = (price - self.inventory_price) * Decimal('100') - (FEE_PER_CONTRACT * 2)
+            self.trade_results.append(1 if trade_pnl > Decimal('0') else 0) # Ghi nhận Thắng/Thua
+            
             self.ac_loss += (FEE_PER_CONTRACT - (price - self.inventory_price) * Decimal('100'))
             self.inventory -= 1
             matched -= 1
@@ -179,26 +197,57 @@ class Backtesting:
     def update_bid_ask(self, current_price: Decimal, step: Decimal, timestamp):
         matched = self.handle_matched_order(current_price)
         
-        # Dùng delay để lọc nhiễu tick (giả sử 10 giây)
+        # Dùng delay để lọc nhiễu tick
         delay_seconds = int(BACKTESTING_CONFIG.get("time", 10))
         
-        # Chỉ cập nhật lại giá đặt lệnh khi hết thời gian chờ hoặc vừa khớp 1 lệnh
+        # 1. Tín hiệu Mean Reversion (Đánh ngược hướng) từ SMA siêu ngắn
+        trend_signal = 0
+        window_size = 20 # Bám sát giá trong 20 tick
+        
+        if len(self.tick_window) >= window_size:
+            recent_ticks = list(self.tick_window)[-window_size:]
+            sma = sum(recent_ticks) / Decimal(str(len(recent_ticks)))
+            
+            # Ngưỡng lệch 1.0 điểm. Nếu lệch quá mức này, khả năng cao giá sẽ giật ngược lại
+            threshold = Decimal("1.0") 
+            if current_price > sma + threshold:
+                # Giá giật lên quá mạnh -> Kiệt sức. Chỉ "Cản đỉnh" (Bán), KHÔNG Mua!
+                trend_signal = -1  
+            elif current_price < sma - threshold:
+                # Giá sập xuống quá mạnh -> Rũ hàng. Chỉ "Bắt đáy" (Mua), KHÔNG Bán!
+                trend_signal = 1 
+
+        # 2. Kiểm tra xem có cần cập nhật lệnh Mua/Bán không
+        update_quotes = False
         if self.old_timestamp is None or timestamp > self.old_timestamp + timedelta(seconds=delay_seconds):
             self.old_timestamp = timestamp
-            
-            # Công thức Skew: Ép giá Mua/Bán lệch đi để tự động thoát hàng khi bị kẹp
-            bid_skew = Decimal(str(max(self.inventory, 0) * 0.02 + 1))
-            ask_skew = Decimal(str(min(self.inventory, 0) * 0.02 - 1))
-            
-            self.bid_price = (current_price - step * bid_skew).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
-            self.ask_price = (current_price - step * ask_skew).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
-            
+            update_quotes = True
         elif matched != 0:
+            update_quotes = True
+
+        # 3. Tiến hành đặt lệnh mới nếu thỏa điều kiện
+        if update_quotes:
+            # Công thức Inventory Skew (Tự động kéo xả hàng khi bị kẹp)
             bid_skew = Decimal(str(max(self.inventory, 0) * 0.02 + 1))
             ask_skew = Decimal(str(min(self.inventory, 0) * 0.02 - 1))
             
-            self.bid_price = (current_price - step * bid_skew).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
-            self.ask_price = (current_price - step * ask_skew).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+            base_bid_price = (current_price - step * bid_skew).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+            base_ask_price = (current_price - step * ask_skew).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+            
+            # 4. Áp dụng tín hiệu Fade the spike (Bảo vệ)
+            if trend_signal == 1:
+                # Chỉ đặt Mua (hứng đáy), Hủy Bán
+                self.bid_price = base_bid_price
+                self.ask_price = None
+            elif trend_signal == -1:
+                # Chỉ đặt Bán (cản đỉnh), Hủy Mua
+                self.bid_price = None
+                self.ask_price = base_ask_price
+            else:
+                # Thị trường đi ngang -> Giăng lưới cả 2 bên (Market Making thuần)
+                self.bid_price = base_bid_price
+                self.ask_price = base_ask_price
+
 
     @staticmethod
     def process_data(evaluation=False):
@@ -245,21 +294,16 @@ class Backtesting:
             current_tick_price = Decimal(str(row["f2_price"] if moving_to_f2 else row["price"]))
             self.tick_window.append(current_tick_price)
 
-            if current_time >= time(14, 30):
-                if self.inventory != 0:
-                    self.close_all_positions(current_tick_price, reason="ATC 14:30")
+            # --- ĐÃ XÓA KHỐI LỆNH CẮT LỖ BẰNG MỌI GIÁ LÚC 14:30 ---
+            # Chỉ cho phép đặt lệnh trong khung giờ an toàn (ví dụ 9:20 - 14:20)
+            if not (self.start_trade_time <= current_time <= self.end_trade_time):
                 self.bid_price = None
                 self.ask_price = None
             else:
-                if not (self.start_trade_time <= current_time <= self.end_trade_time):
-                    self.bid_price = None
-                    self.ask_price = None
-                else:
-                    # KHÔNG CÒN STOP-LOSS Ở ĐÂY NỮA
-                    self.handle_force_sell(current_tick_price)
-                    # Nhớ truyền thêm tham số step vào hàm
-                    self.update_bid_ask(current_price=current_tick_price, step=step, timestamp=row["datetime"])
+                self.handle_force_sell(current_tick_price)
+                self.update_bid_ask(current_price=current_tick_price, step=step, timestamp=row["datetime"])
 
+            # Cập nhật chốt sổ cuối ngày
             if index == len(data) - 1 or row["date"] != data.iloc[index + 1]["date"]:
                 cur_index += 1
                 close_price = Decimal(str(row["f2_close"] if moving_to_f2 else row["close"]))
