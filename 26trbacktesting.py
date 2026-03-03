@@ -49,7 +49,7 @@ class Backtesting:
         self.tick_window = deque(maxlen=100)
         # THAM SỐ TỐI ƯU MỚI:
         self.window_size = 20          # Cửa sổ tính SMA mượt hơn
-        self.max_contracts = 2          # Tăng số lượng để bù đắp chi phí vận hành
+        self.max_contracts = 5          # Tăng số lượng để bù đắp chi phí vận hành
         self.order_size = 1
 
 
@@ -227,24 +227,28 @@ class Backtesting:
 
         # 3. Tiến hành đặt lệnh mới nếu thỏa điều kiện
         if update_quotes:
-            # Công thức Inventory Skew (Tự động kéo xả hàng khi bị kẹp)
-            bid_skew = Decimal(str(max(self.inventory, 0) * 0.02 + 1))
-            ask_skew = Decimal(str(min(self.inventory, 0) * 0.02 - 1))
+            # -------------------------------------------------------------
+            # TRUE SKEW (Avellaneda-Stoikov style)
+            # Dịch chuyển tâm giá (mid_price) ngược lại với lượng hàng tồn kho
+            # Mỗi 1 hợp đồng sẽ dời tâm giá đi 0.05 lần bước giá (step)
+            # -------------------------------------------------------------
+            inventory_shift = Decimal(str(self.inventory)) * Decimal("0.05") * step
             
-            base_bid_price = (current_price - step * bid_skew).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
-            base_ask_price = (current_price - step * ask_skew).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+            # Tâm giá mới bị ép ngược lại (Ôm Long -> hạ tâm giá, Ôm Short -> nâng tâm giá)
+            skewed_mid_price = current_price - inventory_shift
+            
+            # Đặt lệnh Mua/Bán đối xứng qua TÂM GIÁ MỚI
+            base_bid_price = (skewed_mid_price - step).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+            base_ask_price = (skewed_mid_price + step).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
             
             # 4. Áp dụng tín hiệu Fade the spike (Bảo vệ)
             if trend_signal == 1:
-                # Chỉ đặt Mua (hứng đáy), Hủy Bán
                 self.bid_price = base_bid_price
                 self.ask_price = None
             elif trend_signal == -1:
-                # Chỉ đặt Bán (cản đỉnh), Hủy Mua
                 self.bid_price = None
                 self.ask_price = base_ask_price
             else:
-                # Thị trường đi ngang -> Giăng lưới cả 2 bên (Market Making thuần)
                 self.bid_price = base_bid_price
                 self.ask_price = base_ask_price
 
