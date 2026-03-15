@@ -1,31 +1,6 @@
-data/is/teacher's data/VN30F1M_data.csv
-data/is/teacher's data/VN30F2M_data.csv
-data/os/teacher's data/VN30F1M_data.csv
-data/os/teacher's data/VN30F2M_data.csv
-.venv
-.vscode
 __pycache__
-data/is/VN30F1M_data.csv
-data/is/VN30F2M_data.csv
-data/os/VN30F1M_data.csv
-data/os/VN30F2M_data.csv
-result/backtest/hpr.svg
-result/backtest/hpr.svg
-result/backtest/hpr.svg
-result/backtest/inventory.svg
-result/backtest/hpr.svg
-result/backtest/inventory.svg
-result/backtest/hpr.svg
-result/backtest/inventory.svg
-result/backtest/hpr.svg
-result/backtest/drawdown.svg
-config/__pycache__/config.cpython-314.pyc
-result/backtest/drawdown.svg
-result/backtest/hpr.svg
-result/backtest/inventory.svg
-log.txt
-metrics/__pycache__/metric.cpython-39.pyc
-metrics/__pycache__/metric.cpython-39.pyc
-log copy.txt
-log_best.txt
-
+__init__.py
+.DS_Store
+.env
+*.csv
+venv/
