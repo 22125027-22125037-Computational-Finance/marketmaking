@@ -1,32 +1,119 @@
 """
 This is main module for strategy backtesting
 """
-import os
+
 import numpy as np
-from datetime import timedelta, time
+from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from typing import List
+from typing import List, Optional, Tuple
 import pandas as pd
 import matplotlib.pyplot as plt
-from collections import deque
 
-# Giả định các module này đã có sẵn trong môi trường của bạn
-from config.config import BACKTESTING_CONFIG
+from config.config import BACKTESTING_CONFIG, BEST_CONFIG
 from metrics.metric import get_returns, Metric
 from utils import get_expired_dates, from_cash_to_tradeable_contracts, round_decimal
 
 FEE_PER_CONTRACT = Decimal(BACKTESTING_CONFIG["fee"]) * Decimal('100')
 
+
+class PredictiveRSIMarketMaker:
+    """
+    Predictive market making engine with RSI and trend filters.
+
+    Args:
+        spread_multiplier (float): multiplier applied to ATR to derive quote spread.
+    """
+
+    def __init__(self, spread_multiplier: float):
+        if spread_multiplier <= 0:
+            raise ValueError("spread_multiplier must be > 0")
+
+        self.spread_multiplier = float(spread_multiplier)
+
+    def calculateQuotes(
+        self,
+        midPrice: float,
+        currentInventory: int,
+        rsi: float,
+        atr: float,
+        trend_signal: int,
+        adx: float,
+        max_inventory: int = 5,
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Calculate bid/ask with predictive RSI + trend + inventory filters.
+        """
+        dynamic_spread = max(float(atr) * self.spread_multiplier, 0.0)
+
+        if rsi < 30:
+            bid_price = float(midPrice) - (dynamic_spread * 0.5)
+            ask_price = None
+        elif rsi > 70:
+            bid_price = None
+            ask_price = float(midPrice) + (dynamic_spread * 0.5)
+        else:
+            bid_price = float(midPrice) - dynamic_spread
+            ask_price = float(midPrice) + dynamic_spread
+
+        if currentInventory >= max_inventory:
+            bid_price = None
+        if currentInventory <= -max_inventory:
+            ask_price = None
+
+        # In strong trends, block RSI counter-trend extremes.
+        if adx > 25:
+            if trend_signal == 1 and rsi > 70:
+                ask_price = None
+            elif trend_signal == -1 and rsi < 30:
+                bid_price = None
+
+        return bid_price, ask_price
+
+    def calculate_quotes(
+        self,
+        mid_price: float,
+        current_inventory: int,
+        rsi: float,
+        atr: float,
+        trend_signal: int,
+        adx: float,
+        max_inventory: int = 5,
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """Snake-case alias for calculateQuotes."""
+        return self.calculateQuotes(
+            midPrice=mid_price,
+            currentInventory=current_inventory,
+            rsi=rsi,
+            atr=atr,
+            trend_signal=trend_signal,
+            adx=adx,
+            max_inventory=max_inventory,
+        )
+
+
 class Backtesting:
     """
-    Backtesting main class optimized for Market Making
+    Backtesting main class
     """
 
     def __init__(
         self,
         capital: Decimal,
         printable=True,
+        market_maker: Optional[PredictiveRSIMarketMaker] = None,
     ):
+        """
+        Initiate required data
+
+        Args:
+            buy_fee (Decimal)
+            sell_fee (Decimal)
+            from_date_str (str)
+            to_date_str (str)
+            capital (Decimal)
+            path (str, optional). Defaults to "data/is/pe_dps.csv".
+            index_path (str, optional). Defaults to "data/is/vnindex.csv".
+        """
         self.printable = printable
         self.metric = None
 
@@ -45,45 +132,16 @@ class Backtesting:
         self.ac_loss = Decimal("0.0")
         self.transactions = []
         self.order_logs = []
-
-        self.tick_window = deque(maxlen=100)
-        # THAM SỐ TỐI ƯU MỚI:
-        self.window_size = 20          # Cửa sổ tính SMA mượt hơn
-        self.max_contracts = 2          # Tăng số lượng để bù đắp chi phí vận hành
-        self.order_size = 1
-
-
-        self.trade_results = []
-
-        # --- CÁC THAM SỐ ĐÃ TỐI ƯU ---
-        #self.sideways_pct = Decimal("0.0015")   # Siết chặt hơn để chỉ trade khi thị trường đi ngang
-        #self.quote_offset = Decimal("0.2")      # Đặt lệnh cách giá hiện tại 0.2 điểm để tối ưu khớp
-        #self.entry_band = Decimal("0.8")         # Chỉ vào lệnh khi giá lệch SMA ít nhất 0.8 điểm
-        #self.cooldown_ticks = 20                 # Chờ 20 ticks sau mỗi lần chốt lệnh để ổn định
-        
-        # CHẾ ĐỘ PASSIVE: Tắt force_entry để làm Market Maker thực thụ (đặt lệnh chờ)
-        self.force_entry_on_signal = False 
-
-        self.signal_count = 0
-        self.entry_count = 0
-        self.exit_count = 0
-
-        # Edge tối thiểu phải cover được phí round-trip và có buffer lợi nhuận
-        self.min_edge_after_fee = (FEE_PER_CONTRACT * Decimal("2")) / Decimal("100") + Decimal("0.5")
-
-        self.tick_count = 0
-        self.last_flat_tick = -999999
-
-        self.start_trade_time = time(9, 20)      # Bắt đầu muộn hơn 5p để tránh nhiễu đầu giờ
-        self.end_trade_time = time(14, 20)        # Kết thúc sớm hơn để tránh biến động cuối giờ
-
-
-
-        # Nới Stop-loss và tăng Take-profit để bù đắp chi phí giao dịch
-        #self.stop_loss_points = Decimal("-3.0")
-        #self.take_profit_points = Decimal("2.0")
+        self.market_maker = market_maker
+        self.session_start_timestamp = None
+        self.max_inventory = 5
+        self.stop_loss_threshold = Decimal('5.0')
+        self.total_trades = 0
 
     def move_f1_to_f2(self, f1_price, f2_price):
+        """
+        TODO: move f1 to f2
+        """
         if self.inventory > 0:
             self.ac_loss += (self.inventory_price - f1_price) * 100
             self.inventory_price = f2_price
@@ -94,6 +152,12 @@ class Backtesting:
             self.ac_loss += FEE_PER_CONTRACT * abs(self.inventory)
 
     def update_pnl(self, close_price: Decimal):
+        """
+        Daily update pnl
+
+        Args:
+            close_price (Decimal)
+        """
         cur_asset = self.daily_assets[-1]
         new_asset = None
         if self.inventory == 0:
@@ -101,8 +165,7 @@ class Backtesting:
         else:
             sign = 1 if self.inventory > 0 else -1
             pnl = (
-                sign * abs(self.inventory) *
-                (close_price - self.inventory_price) * 100
+                sign * abs(self.inventory) * (close_price - self.inventory_price) * 100
                 - self.ac_loss
             )
             new_asset = cur_asset + pnl
@@ -111,169 +174,302 @@ class Backtesting:
         self.daily_returns.append(new_asset / self.daily_assets[-1] - 1)
         self.daily_assets.append(new_asset)
 
-    def close_all_positions(self, price: Decimal, reason=""):
-        if self.inventory != 0:
-            sign = 1 if self.inventory > 0 else -1
-            trade_pnl = sign * (price - self.inventory_price)
-            self.trade_results.append(1 if trade_pnl > Decimal('0') else 0)
+    def final_exit(self, close_price: Decimal):
+        """
+        Force-liquidate all remaining inventory at end of day.
 
-            qty = Decimal(str(abs(self.inventory)))
+        Args:
+            close_price (Decimal): End-of-day closing price used for liquidation.
+        """
+        if self.inventory == 0:
+            return
 
-            if self.inventory > 0:
-                self.ac_loss += (self.inventory_price - price) * Decimal('100') * qty
-            else:
-                self.ac_loss += (price - self.inventory_price) * Decimal('100') * qty
+        contracts = abs(self.inventory)
+        sign = 1 if self.inventory > 0 else -1
+        realized_per_contract = sign * (close_price - self.inventory_price) * Decimal('100')
 
-            self.ac_loss += FEE_PER_CONTRACT * qty
-            self.inventory = 0
-            self.inventory_price = Decimal('0')
-            self.last_flat_tick = self.tick_count
-            self.exit_count += 1
+        # ac_loss tracks costs net of realized trading gains.
+        self.ac_loss += FEE_PER_CONTRACT * contracts - realized_per_contract * contracts
+        self.total_trades += contracts
+        self.inventory = 0
+        self.inventory_price = Decimal('0')
 
     def handle_force_sell(self, price: Decimal):
+        """
+        Handle force sell
+
+        Args:
+            price (Decimal): _description_
+        """
         while self.get_maximum_placeable(price) < 0:
             sign = 1 if self.inventory < 0 else -1
             self.inventory += sign
             self.ac_loss += abs(price - self.inventory_price) * 100 + FEE_PER_CONTRACT
+            self.total_trades += 1
+
+    def evaluate_stop_loss(self, price: Decimal):
+        """
+        Force-flush inventory when adverse move exceeds stop-loss threshold.
+
+        Args:
+            price (Decimal): Current instrument price.
+        """
+        if self.inventory > 0 and (self.inventory_price - price) >= self.stop_loss_threshold:
+            self.ac_loss += (
+                (self.inventory_price - price) * 100 * abs(self.inventory)
+                + (FEE_PER_CONTRACT * abs(self.inventory))
+            )
+            self.total_trades += abs(self.inventory)
+            self.inventory = 0
+            self.inventory_price = Decimal('0')
+
+        elif self.inventory < 0 and (price - self.inventory_price) >= self.stop_loss_threshold:
+            self.ac_loss += (
+                (price - self.inventory_price) * 100 * abs(self.inventory)
+                + (FEE_PER_CONTRACT * abs(self.inventory))
+            )
+            self.total_trades += abs(self.inventory)
+            self.inventory = 0
+            self.inventory_price = Decimal('0')
 
     def get_maximum_placeable(self, inst_price: Decimal):
-        MAX_CONTRACTS = self.max_contracts
-        cash_placeable = max(
+        """
+        Get maximum placeable
+
+        Args:
+            inst_price (Decimal): _description_
+
+        Returns:
+            _type_: _description_
+        """
+        total_placeable = max(
             from_cash_to_tradeable_contracts(
                 self.daily_assets[-1] - self.ac_loss, inst_price
             ),
             0,
         )
-        allowed_by_risk = MAX_CONTRACTS - abs(self.inventory)
-        return min(cash_placeable, allowed_by_risk)
+        return total_placeable - abs(self.inventory)
 
-    def handle_matched_order(self, price: Decimal):
+    def handle_matched_order(self, price):
+        """
+        Handle matched order
+
+        Args:
+            price (_type_): _description_
+        """
         matched = 0
         placeable = self.get_maximum_placeable(price)
-        
-        if self.bid_price is None or self.ask_price is None:
+        if self.bid_price is None and self.ask_price is None:
             return matched
 
-        # -----------------------------------------
-        # 1. Khớp lệnh Bid (Chúng ta đang MUA vào)
-        # -----------------------------------------
-        if self.bid_price >= price and self.inventory >= 0 and placeable > 0:
-            # Đang rỗng hoặc ôm Long -> Mở/Nhồi thêm Long
-            self.inventory_price = (self.inventory_price * abs(self.inventory) + price) / (abs(self.inventory) + 1)
+        if (
+            self.bid_price is not None
+            and self.bid_price > price
+            and self.inventory >= 0
+            and placeable > 0
+        ):
+            self.inventory_price = (
+                self.inventory_price * abs(self.inventory) + price
+            ) / (abs(self.inventory) + 1)
             self.inventory += 1
             matched += 1
-            
-        elif self.bid_price >= price and self.inventory < 0:
-            # Đang ôm Short -> Khớp lệnh Mua nghĩa là ĐÓNG SHORT (Chốt vị thế)
-            # Tính PnL cho 1 hợp đồng (Bán cao - Mua thấp) trừ đi phí 2 chiều
-            trade_pnl = (self.inventory_price - price) * Decimal('100') - (FEE_PER_CONTRACT * 2)
-            self.trade_results.append(1 if trade_pnl > Decimal('0') else 0) # Ghi nhận Thắng/Thua
-            
+            self.total_trades += 1
+        elif self.bid_price is not None and self.bid_price > price and self.inventory < 0:
             self.ac_loss += (FEE_PER_CONTRACT - (self.inventory_price - price) * Decimal('100'))
             self.inventory += 1
+            if self.inventory == 0:
+                self.inventory_price = Decimal('0')
             matched -= 1
+            self.total_trades += 1
 
-        # -----------------------------------------
-        # 2. Khớp lệnh Ask (Chúng ta đang BÁN ra)
-        # -----------------------------------------
-        if self.ask_price <= price and self.inventory <= 0 and placeable > 0:
-            # Đang rỗng hoặc ôm Short -> Mở/Nhồi thêm Short
-            self.inventory_price = (self.inventory_price * abs(self.inventory) + price) / (abs(self.inventory) + 1)
+        if (
+            self.ask_price is not None
+            and self.ask_price < price
+            and self.inventory <= 0
+            and placeable > 0
+        ):
+            self.inventory_price = (
+                self.inventory_price * abs(self.inventory) + price
+            ) / (abs(self.inventory) + 1)
             self.inventory -= 1
             matched += 1
-            
-        elif self.ask_price <= price and self.inventory > 0:
-            # Đang ôm Long -> Khớp lệnh Bán nghĩa là ĐÓNG LONG (Chốt vị thế)
-            # Tính PnL cho 1 hợp đồng (Bán cao - Mua thấp) trừ đi phí 2 chiều
-            trade_pnl = (price - self.inventory_price) * Decimal('100') - (FEE_PER_CONTRACT * 2)
-            self.trade_results.append(1 if trade_pnl > Decimal('0') else 0) # Ghi nhận Thắng/Thua
-            
+            self.total_trades += 1
+        elif self.ask_price is not None and self.ask_price < price and self.inventory > 0:
             self.ac_loss += (FEE_PER_CONTRACT - (price - self.inventory_price) * Decimal('100'))
             self.inventory -= 1
+            if self.inventory == 0:
+                self.inventory_price = Decimal('0')
             matched -= 1
+            self.total_trades += 1
 
         return matched
 
-    def update_bid_ask(self, current_price: Decimal, step: Decimal, timestamp):
-        matched = self.handle_matched_order(current_price)
-        
-        # Dùng delay để lọc nhiễu tick
-        delay_seconds = int(BACKTESTING_CONFIG.get("time", 10))
-        
-        # 1. Tín hiệu Mean Reversion (Đánh ngược hướng) từ SMA siêu ngắn
-        trend_signal = 0
-        window_size = 20 # Bám sát giá trong 20 tick
-        
-        if len(self.tick_window) >= window_size:
-            recent_ticks = list(self.tick_window)[-window_size:]
-            sma = sum(recent_ticks) / Decimal(str(len(recent_ticks)))
-            
-            # Ngưỡng lệch 1.0 điểm. Nếu lệch quá mức này, khả năng cao giá sẽ giật ngược lại
-            threshold = Decimal("1.0") 
-            if current_price > sma + threshold:
-                # Giá giật lên quá mạnh -> Kiệt sức. Chỉ "Cản đỉnh" (Bán), KHÔNG Mua!
-                trend_signal = -1  
-            elif current_price < sma - threshold:
-                # Giá sập xuống quá mạnh -> Rũ hàng. Chỉ "Bắt đáy" (Mua), KHÔNG Bán!
-                trend_signal = 1 
+    def update_bid_ask(self, price: Decimal, step, timestamp, rsi, atr, adx, trend_signal=0):
+        """
+        Placing bid ask formula
 
-        # 2. Kiểm tra xem có cần cập nhật lệnh Mua/Bán không
-        update_quotes = False
-        if self.old_timestamp is None or timestamp > self.old_timestamp + timedelta(seconds=delay_seconds):
+        Args:
+            price (Decimal)
+        """
+        matched = self.handle_matched_order(price)
+
+        if self.old_timestamp is None or timestamp > self.old_timestamp + timedelta(
+            seconds=int(BACKTESTING_CONFIG["time"])
+        ):
             self.old_timestamp = timestamp
-            update_quotes = True
-        elif matched != 0:
-            update_quotes = True
-
-        # 3. Tiến hành đặt lệnh mới nếu thỏa điều kiện
-        if update_quotes:
-            # Công thức Inventory Skew (Tự động kéo xả hàng khi bị kẹp)
-            bid_skew = Decimal(str(max(self.inventory, 0) * 0.02 + 1))
-            ask_skew = Decimal(str(min(self.inventory, 0) * 0.02 - 1))
-            
-            base_bid_price = (current_price - step * bid_skew).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
-            base_ask_price = (current_price - step * ask_skew).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
-            
-            # 4. Áp dụng tín hiệu Fade the spike (Bảo vệ)
-            if trend_signal == 1:
-                # Chỉ đặt Mua (hứng đáy), Hủy Bán
-                self.bid_price = base_bid_price
-                self.ask_price = None
-            elif trend_signal == -1:
-                # Chỉ đặt Bán (cản đỉnh), Hủy Mua
-                self.bid_price = None
-                self.ask_price = base_ask_price
+            if self.market_maker is not None:
+                bid, ask = self.market_maker.calculateQuotes(
+                    midPrice=float(price),
+                    currentInventory=self.inventory,
+                    rsi=float(rsi),
+                    atr=float(atr),
+                    trend_signal=trend_signal,
+                    adx=float(adx),
+                    max_inventory=self.max_inventory,
+                )
+                self.bid_price = (
+                    Decimal(str(bid)).quantize(Decimal("0.0"), rounding=ROUND_HALF_UP)
+                    if bid is not None
+                    else None
+                )
+                self.ask_price = (
+                    Decimal(str(ask)).quantize(Decimal("0.0"), rounding=ROUND_HALF_UP)
+                    if ask is not None
+                    else None
+                )
             else:
-                # Thị trường đi ngang -> Giăng lưới cả 2 bên (Market Making thuần)
-                self.bid_price = base_bid_price
-                self.ask_price = base_ask_price
-
+                if step is None:
+                    raise ValueError("step is required when market_maker is not provided")
+                self.bid_price = (
+                    price - step * Decimal(max(self.inventory, 0) * 0.02 + 1)
+                ).quantize(Decimal("0.0"), rounding=ROUND_HALF_UP)
+                self.ask_price = (
+                    price - step * Decimal(min(self.inventory, 0) * 0.02 - 1)
+                ).quantize(Decimal("0.0"), rounding=ROUND_HALF_UP)
+        elif matched != 0:
+            if self.market_maker is not None:
+                bid, ask = self.market_maker.calculateQuotes(
+                    midPrice=float(price),
+                    currentInventory=self.inventory,
+                    rsi=float(rsi),
+                    atr=float(atr),
+                    trend_signal=trend_signal,
+                    adx=float(adx),
+                    max_inventory=self.max_inventory,
+                )
+                self.bid_price = (
+                    Decimal(str(bid)).quantize(Decimal("0.0"), rounding=ROUND_HALF_UP)
+                    if bid is not None
+                    else None
+                )
+                self.ask_price = (
+                    Decimal(str(ask)).quantize(Decimal("0.0"), rounding=ROUND_HALF_UP)
+                    if ask is not None
+                    else None
+                )
+            else:
+                if step is None:
+                    raise ValueError("step is required when market_maker is not provided")
+                self.bid_price = (
+                    price - step * Decimal(max(self.inventory, 0) * 0.02 + 1)
+                ).quantize(Decimal("0.0"), rounding=ROUND_HALF_UP)
+                self.ask_price = (
+                    price - step * Decimal(min(self.inventory, 0) * 0.02 - 1)
+                ).quantize(Decimal("0.0"), rounding=ROUND_HALF_UP)
 
     @staticmethod
     def process_data(evaluation=False):
         prefix_path = "data/os/" if evaluation else "data/is/"
         f1_data = pd.read_csv(f"{prefix_path}VN30F1M_data.csv")
-        f1_data["datetime"] = pd.to_datetime(f1_data["datetime"], format="%Y-%m-%d %H:%M:%S.%f")
-        f1_data["date"] = pd.to_datetime(f1_data["date"], format="%Y-%m-%d").dt.date
+        f1_data["datetime"] = pd.to_datetime(
+            f1_data["datetime"], format="%Y-%m-%d %H:%M:%S.%f"
+        )
+        f1_data["date"] = (
+            pd.to_datetime(f1_data["date"], format="%Y-%m-%d").copy().dt.date
+        )
         rounding_columns = ["close", "price", "best-bid", "best-ask", "spread"]
         for col in rounding_columns:
             f1_data = round_decimal(f1_data, col)
 
         f2_data = pd.read_csv(f"{prefix_path}VN30F2M_data.csv")
         f2_data = f2_data[["date", "datetime", "tickersymbol", "price", "close"]].copy()
-        f2_data["datetime"] = pd.to_datetime(f2_data["datetime"], format="%Y-%m-%d %H:%M:%S.%f")
-        f2_data["date"] = pd.to_datetime(f2_data["date"], format="%Y-%m-%d").dt.date
-        f2_data.rename(columns={"price": "f2_price", "close": "f2_close", "tickersymbol": "f2-tickersymbol"}, inplace=True)
+        f2_data["datetime"] = pd.to_datetime(
+            f2_data["datetime"], format="%Y-%m-%d %H:%M:%S.%f"
+        )
+        f2_data["date"] = (
+            pd.to_datetime(f2_data["date"], format="%Y-%m-%d").copy().dt.date
+        )
+        f2_data.rename(
+            columns={
+                "price": "f2_price",
+                "close": "f2_close",
+                "tickersymbol": "f2-tickersymbol",
+            },
+            inplace=True,
+        )
         rounding_columns = ["f2_close", "f2_price"]
         for col in rounding_columns:
             f2_data = round_decimal(f2_data, col)
 
-        f1_data = pd.merge(f1_data, f2_data, on=["datetime", "date"], how="outer", sort=True)
+        f1_data = pd.merge(
+            f1_data,
+            f2_data,
+            on=["datetime", "date"],
+            how="outer",
+            sort=True,
+        )
         f1_data = f1_data.ffill()
+        f1_data["rolling_sigma"] = f1_data["price"].rolling(window=60).std()
+        f1_data["rolling_sigma"] = f1_data["rolling_sigma"].ffill().fillna(15.0)
+        f1_data["ema_fast"] = f1_data["price"].ewm(span=12, adjust=False).mean()
+        f1_data["ema_slow"] = f1_data["price"].ewm(span=26, adjust=False).mean()
+
+        delta = f1_data["price"].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(window=14).mean()
+        avg_loss = loss.rolling(window=14).mean()
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        f1_data["rsi"] = 100 - (100 / (1 + rs))
+        f1_data["rsi"] = f1_data["rsi"].fillna(50)
+
+        high = f1_data["best-ask"].astype(float)
+        low = f1_data["best-bid"].astype(float)
+        close = f1_data["close"].astype(float)
+
+        up_move = high.diff()
+        down_move = low.shift(1) - low
+
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+        tr_components = pd.concat(
+            [
+                (high - low).abs(),
+                (high - close.shift(1)).abs(),
+                (low - close.shift(1)).abs(),
+            ],
+            axis=1,
+        )
+        true_range = tr_components.max(axis=1)
+        atr = true_range.rolling(window=14).mean()
+        f1_data["atr"] = atr.ffill().fillna(0.0)
+
+        plus_di = 100 * (pd.Series(plus_dm, index=f1_data.index).rolling(window=14).mean() / atr)
+        minus_di = 100 * (pd.Series(minus_dm, index=f1_data.index).rolling(window=14).mean() / atr)
+        di_sum = (plus_di + minus_di).replace(0, np.nan)
+        dx = ((plus_di - minus_di).abs() / di_sum) * 100
+        f1_data["adx"] = dx.rolling(window=14).mean().fillna(0.0)
+
         return f1_data
 
-    def run(self, data: pd.DataFrame, step: Decimal):
+    def run(self, data: pd.DataFrame, step: Optional[Decimal] = None):
+        """
+        Main backtesting function
+        """
+
         trading_dates = data["date"].unique().tolist()
+
         start_date = data["datetime"].iloc[0]
         end_date = data["datetime"].iloc[-1]
         expiration_dates = get_expired_dates(start_date, end_date)
@@ -281,37 +477,50 @@ class Backtesting:
         cur_index = 0
         moving_to_f2 = False
         for index, row in data.iterrows():
-            self.tick_count += 1
             self.cur_date = row["datetime"]
-            current_time = self.cur_date.time()
-
-            if (cur_index != len(trading_dates) - 1 and not expiration_dates.empty() 
-                and trading_dates[cur_index + 1] >= expiration_dates.queue[0]):
+            self.ticker = row["tickersymbol"]
+            rsi_value = row["rsi"]
+            adx_value = row["adx"]
+            atr_value = row["atr"]
+            ema_fast = row["ema_fast"]
+            ema_slow = row["ema_slow"]
+            if ema_fast < ema_slow - 2.0:
+                trend_signal = -1
+            elif ema_fast > ema_slow + 2.0:
+                trend_signal = 1
+            else:
+                trend_signal = 0
+            if (
+                cur_index != len(trading_dates) - 1
+                and not expiration_dates.empty()
+                and trading_dates[cur_index + 1] >= expiration_dates.queue[0]
+            ):
                 self.move_f1_to_f2(row["price"], row["f2_price"])
                 expiration_dates.get()
                 moving_to_f2 = True
 
-            current_tick_price = Decimal(str(row["f2_price"] if moving_to_f2 else row["price"]))
-            self.tick_window.append(current_tick_price)
+            current_price = row["f2_price"] if moving_to_f2 else row["price"]
+            self.handle_force_sell(current_price)
+            self.evaluate_stop_loss(current_price)
+            self.update_bid_ask(
+                current_price,
+                step,
+                row["datetime"],
+                rsi_value,
+                atr_value,
+                adx_value,
+                trend_signal,
+            )
 
-            # --- ĐÃ XÓA KHỐI LỆNH CẮT LỖ BẰNG MỌI GIÁ LÚC 14:30 ---
-            # Chỉ cho phép đặt lệnh trong khung giờ an toàn (ví dụ 9:20 - 14:20)
-            if not (self.start_trade_time <= current_time <= self.end_trade_time):
-                self.bid_price = None
-                self.ask_price = None
-            else:
-                self.handle_force_sell(current_tick_price)
-                self.update_bid_ask(current_price=current_tick_price, step=step, timestamp=row["datetime"])
-
-            # Cập nhật chốt sổ cuối ngày
             if index == len(data) - 1 or row["date"] != data.iloc[index + 1]["date"]:
                 cur_index += 1
-                close_price = Decimal(str(row["f2_close"] if moving_to_f2 else row["close"]))
+                close_price = row["f2_close"] if moving_to_f2 else row["close"]
+                self.final_exit(close_price)
                 self.update_pnl(close_price)
-
                 if self.printable:
-                    print(f"Realized asset {row['date']}: {int(self.daily_assets[-1] * Decimal('1000'))} VND")
-
+                    print(
+                        f"Realized asset {row['date']}: {int(self.daily_assets[-1] * Decimal('1000'))} VND"
+                    )
                 if moving_to_f2:
                     self.monthly_tracking.append([row["date"], self.daily_assets[-1]])
 
@@ -319,19 +528,33 @@ class Backtesting:
                 self.ac_loss = Decimal("0.0")
                 self.bid_price = None
                 self.ask_price = None
-                self.tick_window.clear()
+                self.old_timestamp = None
+                self.session_start_timestamp = None
+
                 self.tracking_dates.append(row["date"])
                 self.daily_inventory.append(self.inventory)
 
         self.metric = Metric(self.daily_returns, None)
 
-    # Các hàm plot giữ nguyên...
     def plot_hpr(self, path="result/backtest/hpr.svg"):
+        """
+        Plot and save NAV chart to path
+
+        Args:
+            path (str, optional): _description_. Defaults to "result/backtest/hpr.svg".
+        """
         plt.figure(figsize=(10, 6))
+
         assets = pd.Series(self.daily_assets)
         ac_return = assets.apply(lambda x: x / assets.iloc[0])
         ac_return = [(val - 1) * 100 for val in ac_return.to_numpy()[1:]]
-        plt.plot(self.tracking_dates, ac_return, label="Portfolio", color='black')
+        plt.plot(
+            self.tracking_dates,
+            ac_return,
+            label="Portfolio",
+            color='black',
+        )
+
         plt.title('Holding Period Return Over Time')
         plt.xlabel('Time Step')
         plt.ylabel('Holding Period Return (%)')
@@ -340,9 +563,22 @@ class Backtesting:
         plt.savefig(path, dpi=300, bbox_inches='tight')
 
     def plot_drawdown(self, path="result/backtest/drawdown.svg"):
+        """
+        Plot and save drawdown chart to path
+
+        Args:
+            path (str, optional): _description_. Defaults to "result/backtest/drawdown.svg".
+        """
         _, drawdowns = self.metric.maximum_drawdown()
+
         plt.figure(figsize=(10, 6))
-        plt.plot(self.tracking_dates, drawdowns, label="Portfolio", color='black')
+        plt.plot(
+            self.tracking_dates,
+            drawdowns,
+            label="Portfolio",
+            color='black',
+        )
+
         plt.title('Draw down Value Over Time')
         plt.xlabel('Time Step')
         plt.ylabel('Percentage')
@@ -351,38 +587,54 @@ class Backtesting:
 
     def plot_inventory(self, path="result/backtest/inventory.svg"):
         plt.figure(figsize=(10, 6))
-        plt.plot(self.tracking_dates, self.daily_inventory, label="Portfolio", color='black')
+        plt.plot(
+            self.tracking_dates,
+            self.daily_inventory,
+            label="Portfolio",
+            color='black',
+        )
+
         plt.title('Inventory Value Over Time')
         plt.xlabel('Time Step')
         plt.grid(True)
         plt.tight_layout()
         plt.savefig(path, dpi=300, bbox_inches='tight')
 
-if __name__ == "__main__":
-    bt = Backtesting(capital=Decimal("5e5"))
-    data = bt.process_data()
-    bt.run(data, Decimal("1.8"))
 
-    print(f"Sharpe ratio: {bt.metric.sharpe_ratio(risk_free_return=Decimal('0.00023')) * Decimal(np.sqrt(250))}")
-    print(f"Sortino ratio: {bt.metric.sortino_ratio(risk_free_return=Decimal('0.00023')) * Decimal(np.sqrt(250))}")
+if __name__ == "__main__":
+    spread_multiplier = float(BEST_CONFIG.get("spread_multiplier", BEST_CONFIG.get("spread", 0.2)))
+    stop_loss = Decimal(str(BEST_CONFIG.get("stop_loss", "5.0")))
+    max_inv = int(BEST_CONFIG.get("max_inv", 5))
+
+    market_maker = PredictiveRSIMarketMaker(spread_multiplier=spread_multiplier)
+
+    bt = Backtesting(
+        capital=Decimal("5e5"),
+        market_maker=market_maker,
+    )
+    bt.stop_loss_threshold = stop_loss
+    bt.max_inventory = max_inv
+
+    data = bt.process_data()
+    bt.run(data)
+
+    print(
+        f"Sharpe ratio: {bt.metric.sharpe_ratio(risk_free_return=Decimal('0.00023')) * Decimal(np.sqrt(250))}"
+    )
+    print(
+        f"Sortino ratio: {bt.metric.sortino_ratio(risk_free_return=Decimal('0.00023')) * Decimal(np.sqrt(250))}"
+    )
     mdd, _ = bt.metric.maximum_drawdown()
     print(f"Maximum drawdown: {mdd}")
 
     monthly_df = pd.DataFrame(bt.monthly_tracking, columns=["date", "asset"])
-    if len(monthly_df) > 0:
-        returns = get_returns(monthly_df)
-        print(f"Monthly return {returns['monthly_return']}")
-        print(f"Annual return {returns['annual_return']}")
+    returns = get_returns(monthly_df)
 
     print(f"HPR {bt.metric.hpr()}")
+    print(f"Monthly return {returns['monthly_return']}")
+    print(f"Annual return {returns['annual_return']}")
+    print(f"Total trades: {bt.total_trades}")
 
-    if len(bt.trade_results) > 0:
-        win_rate = sum(bt.trade_results) / len(bt.trade_results) * 100
-        print(f"Win Rate: {win_rate:.2f}% (Tổng số lệnh chốt: {len(bt.trade_results)})")
-    else:
-        print("Win Rate: 0% (Không có lệnh nào được khớp)")
-
-    os.makedirs("result/backtest", exist_ok=True)
     bt.plot_hpr()
     bt.plot_drawdown()
     bt.plot_inventory()

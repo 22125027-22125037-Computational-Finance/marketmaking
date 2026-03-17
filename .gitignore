@@ -4,3 +4,7 @@ __init__.py
 .env
 *.csv
 venv/
+deliverables/backtest/log.txt
+deliverables/backtest/original.txt
+deliverables/backtest/original2.txt
+backtesting_original.py
