@@ -1,5 +1,6 @@
 {
-    "spread": 3.0,
+    "spread_multiplier": 0.5,
+    "spread": 0.5,
     "stop_loss": "10.0",
-    "max_inv": 10
+    "max_inv": 5
 }

@@ -8,3 +8,21 @@ deliverables/backtest/log.txt
 deliverables/backtest/original.txt
 deliverables/backtest/original2.txt
 backtesting_original.py
+deliverables/Gemini Context/utils.py
+deliverables/Gemini Context/optimize.py
+deliverables/Gemini Context/optimized_parameter.json
+deliverables/Gemini Context/metric.py
+deliverables/Gemini Context/marketmaking.ipynb
+deliverables/Gemini Context/evaluation_log.txt
+deliverables/Gemini Context/evaluation.py
+deliverables/Gemini Context/Co-pilot summary.md
+deliverables/Gemini Context/backtesting.py
+deliverables/Gemini Context/backtesting_log.txt
+result/optimization/inventory.svg
+result/optimization/hpr.svg
+result/optimization/drawdown.svg
+result/backtest/inventory.svg
+result/backtest/hpr.svg
+result/backtest/drawdown.svg
+deliverables/strategy_evolution_v2.md
+deliverables/strategy_evolution_v2.md
