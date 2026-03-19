@@ -136,6 +136,8 @@ class Backtesting:
         self.session_start_timestamp = None
         self.max_inventory = 5
         self.stop_loss_threshold = Decimal('5.0')
+        self.kill_switch_threshold = Decimal('4e8')
+        self.trading_halted = False
         self.total_trades = 0
 
     def move_f1_to_f2(self, f1_price, f2_price):
@@ -231,6 +233,20 @@ class Backtesting:
             self.total_trades += abs(self.inventory)
             self.inventory = 0
             self.inventory_price = Decimal('0')
+
+    def evaluate_kill_switch(self, current_price: Decimal):
+        """
+        Trigger catastrophic circuit breaker when equity breaches threshold.
+
+        Args:
+            current_price (Decimal): Current instrument price for emergency liquidation.
+        """
+        if self.daily_assets[-1] < self.kill_switch_threshold and not self.trading_halted:
+            print(
+                "CRITICAL: Kill switch triggered. Equity dropped below 400M VND. Halting all trading."
+            )
+            self.final_exit(current_price)
+            self.trading_halted = True
 
     def get_maximum_placeable(self, inst_price: Decimal):
         """
@@ -501,16 +517,19 @@ class Backtesting:
 
             current_price = row["f2_price"] if moving_to_f2 else row["price"]
             self.handle_force_sell(current_price)
-            self.evaluate_stop_loss(current_price)
-            self.update_bid_ask(
-                current_price,
-                step,
-                row["datetime"],
-                rsi_value,
-                atr_value,
-                adx_value,
-                trend_signal,
-            )
+            if not self.trading_halted:
+                self.evaluate_stop_loss(current_price)
+                self.evaluate_kill_switch(current_price)
+                if not self.trading_halted:
+                    self.update_bid_ask(
+                        current_price,
+                        step,
+                        row["datetime"],
+                        rsi_value,
+                        atr_value,
+                        adx_value,
+                        trend_signal,
+                    )
 
             if index == len(data) - 1 or row["date"] != data.iloc[index + 1]["date"]:
                 cur_index += 1
