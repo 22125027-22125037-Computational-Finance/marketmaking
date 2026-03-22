@@ -96,6 +96,8 @@ class LiveTradingEngine:
         self.kill_switch_equity = 400_000_000.0
         self.trading_halted = False
 
+        self.fee_per_contract = 40_000.0  # 0.4 points * 100,000 multiplier
+
         self.inventory = 0
         self.avg_entry_price: Optional[float] = None
         self.realized_pnl = 0.0
@@ -213,9 +215,10 @@ class LiveTradingEngine:
 
         dashboard_task = asyncio.create_task(self.print_dashboard_loop(), name="dashboard-loop")
         kafka_task = asyncio.create_task(self._run_kafka_consumer(), name="kafka-consumer")
+        trading_task = asyncio.create_task(self._trading_logic_loop(), name="trading-logic")
 
         try:
-            await asyncio.gather(kafka_task, dashboard_task)
+            await asyncio.gather(kafka_task, dashboard_task, trading_task)
         finally:
             self.stop()
 
@@ -278,7 +281,9 @@ class LiveTradingEngine:
         self._refresh_equity(force_pull=False)
         self._evaluate_kill_switch()
 
-    def on_quote(self, quote_snapshot: Any) -> None:
+    def on_quote(self, instrument: str, quote_snapshot: Any) -> None:
+        """Lightweight callback just to append the latest price."""
+        _ = instrument
         latest_price = self._extract_latest_price(quote_snapshot)
         if latest_price is None:
             return
@@ -286,36 +291,48 @@ class LiveTradingEngine:
         self.last_price = latest_price
         self.prices.append(latest_price)
 
-        self._refresh_equity(force_pull=False)
-        self._evaluate_kill_switch()
+    async def _trading_logic_loop(self) -> None:
+        """Background task to calculate indicators and place orders."""
+        last_processed_price = None
 
-        if self.trading_halted:
-            return
+        while not self.trading_halted:
+            await asyncio.sleep(0.1)
 
-        if len(self.prices) < self.min_points_for_signals:
-            return
+            if self.last_price is None or self.last_price == last_processed_price:
+                continue
 
-        indicators = self._calculate_indicators()
-        if indicators is None:
-            return
+            last_processed_price = self.last_price
 
-        self.latest_indicators["rsi"] = indicators["rsi"]
-        self.latest_indicators["adx"] = indicators["adx"]
-        self.latest_indicators["atr"] = indicators["atr"]
-        self.latest_indicators["dynamic_spread"] = indicators["atr"] * self.spread_multiplier
+            self._refresh_equity(force_pull=False)
+            self._evaluate_kill_switch()
 
-        bid_price, ask_price = self.market_maker.calculate_quotes(
-            mid_price=latest_price,
-            current_inventory=self.inventory,
-            rsi=indicators["rsi"],
-            atr=indicators["atr"],
-            trend_signal=indicators["trend_signal"],
-            adx=indicators["adx"],
-            max_inventory=self.max_inventory,
-        )
+            if self.trading_halted:
+                break
 
-        self._replace_order_if_needed("BUY", bid_price)
-        self._replace_order_if_needed("SELL", ask_price)
+            if len(self.prices) < self.min_points_for_signals:
+                continue
+
+            indicators = self._calculate_indicators()
+            if indicators is None:
+                continue
+
+            self.latest_indicators["rsi"] = indicators["rsi"]
+            self.latest_indicators["adx"] = indicators["adx"]
+            self.latest_indicators["atr"] = indicators["atr"]
+            self.latest_indicators["dynamic_spread"] = indicators["atr"] * self.spread_multiplier
+
+            bid_price, ask_price = self.market_maker.calculate_quotes(
+                mid_price=self.last_price,
+                current_inventory=self.inventory,
+                rsi=indicators["rsi"],
+                atr=indicators["atr"],
+                trend_signal=indicators["trend_signal"],
+                adx=indicators["adx"],
+                max_inventory=self.max_inventory,
+            )
+
+            self._replace_order_if_needed("BUY", bid_price)
+            self._replace_order_if_needed("SELL", ask_price)
 
     async def print_dashboard_loop(self) -> None:
         """Print live status block every 10 seconds until trading is halted."""
@@ -461,19 +478,19 @@ class LiveTradingEngine:
         if existing is not None:
             self._cancel_order(existing.cl_ord_id)
 
-        cl_ord_id = self._gen_cl_ord_id(side)
-        self._place_limit_order(
-            cl_ord_id=cl_ord_id,
+        cl_ord_id = self._place_limit_order(
             side=side,
             qty=self.order_qty,
             price=normalized_price,
         )
-        self.active_orders[side] = ActiveOrder(
-            cl_ord_id=cl_ord_id,
-            side=side,
-            price=normalized_price,
-            qty=self.order_qty,
-        )
+
+        if cl_ord_id:
+            self.active_orders[side] = ActiveOrder(
+                cl_ord_id=cl_ord_id,
+                side=side,
+                price=normalized_price,
+                qty=self.order_qty,
+            )
 
     def _cancel_order(self, cl_ord_id: str) -> None:
         try:
@@ -483,62 +500,40 @@ class LiveTradingEngine:
         except Exception as exc:  # pragma: no cover - runtime broker error
             print(f"Cancel order failed for {cl_ord_id}: {exc}")
 
-    def _place_limit_order(self, cl_ord_id: str, side: str, qty: int, price: float) -> None:
-        side_value = side.lower()
-        order = {
-            "cl_ord_id": cl_ord_id,
-            "symbol": self.symbol,
-            "side": side_value,
-            "order_type": "limit",
-            "qty": qty,
-            "price": price,
-            "sub_account": self.sub_account,
-        }
-
+    def _place_limit_order(self, side: str, qty: int, price: float) -> str:
         try:
-            self.client.place_order(**order)
-        except TypeError:
-            # Fallback for SDKs expecting different field names.
-            fallback = {
-                "clOrdID": cl_ord_id,
-                "symbol": self.symbol,
-                "side": side_value,
-                "ordType": "LIMIT",
-                "orderQty": qty,
-                "price": price,
-                "sub_account": self.sub_account,
-            }
-            self.client.place_order(**fallback)
+            cl_ord_id = self.client.place_order(
+                full_symbol=self.symbol,
+                side=side.upper(),
+                qty=qty,
+                price=price,
+                ord_type="LIMIT",
+            )
+            return str(cl_ord_id) if cl_ord_id is not None else ""
+        except Exception as exc:
+            print(f"Failed to place limit order: {exc}")
+            return ""
 
     def _place_market_order(self, side: str, qty: int) -> None:
         if qty <= 0:
             return
 
-        cl_ord_id = self._gen_cl_ord_id(f"MKT-{side}")
-        order = {
-            "cl_ord_id": cl_ord_id,
-            "symbol": self.symbol,
-            "side": side.lower(),
-            "order_type": "market",
-            "qty": qty,
-            "sub_account": self.sub_account,
-        }
-
         try:
-            self.client.place_order(**order)
-        except TypeError:
-            fallback = {
-                "clOrdID": cl_ord_id,
-                "symbol": self.symbol,
-                "side": side.lower(),
-                "ordType": "MARKET",
-                "orderQty": qty,
-                "sub_account": self.sub_account,
-            }
-            self.client.place_order(**fallback)
+            self.client.place_order(
+                full_symbol=self.symbol,
+                side=side.upper(),
+                qty=qty,
+                price=0.0,
+                ord_type="MARKET",
+            )
+        except Exception as exc:
+            print(f"Failed to place market order: {exc}")
 
     def _apply_fill(self, side: str, qty: int, price: float) -> None:
         signed_qty = qty if side == "BUY" else -qty
+        
+        # Deduct exchange fees immediately upon any fill
+        self.realized_pnl -= (qty * self.fee_per_contract)
 
         if self.inventory == 0:
             self.inventory = signed_qty
@@ -717,11 +712,6 @@ class LiveTradingEngine:
             return float(value)
         steps = round(float(value) / self.tick_size)
         return round(steps * self.tick_size, 6)
-
-    @staticmethod
-    def _gen_cl_ord_id(prefix: str) -> str:
-        return f"{prefix}-{int(time.time() * 1000)}"
-
 
 async def main() -> None:
     engine = LiveTradingEngine()

@@ -38,3 +38,34 @@ requests.exceptions.HTTPError: 502 Server Error: Bad Gateway for url: https://pa
 [2026-03-22 22:38:06] [INFO] Starting Kafka consumer for topics: ['real.HNXDS.VN30F2603']
 [2026-03-22 22:38:06] [INFO] Kafka consumer thread started
 [2026-03-22 22:38:06] [INFO] Kafka consumer started
+[2026-03-22 22:42:57] [INFO] Session created: FIX.4.4:9629235d865343419b0dc388bbb34960->SERVER
+[2026-03-22 22:42:57] [DEBUG] FIXSessionManager initialized config=C:\Users\khiem\AppData\Local\Temp\paperbroker_yfvki33r.cfg username=Group08
+[2026-03-22 22:42:57] [DEBUG] RestSession initialized with base_url: https://papertrade.algotrade.vn/accounting
+[2026-03-22 22:42:57] [INFO] Initialized KafkaMarketDataClient: 52.77.119.94:9092, merge_updates=True
+[2026-03-22 22:42:57] [DEBUG] Registered handler for event 'fix:logon'. Total handlers: 1
+[2026-03-22 22:42:57] [DEBUG] Registered handler for event 'fix:logout'. Total handlers: 2
+[2026-03-22 22:42:57] [DEBUG] Registered handler for event 'fix:order:filled'. Total handlers: 3
+[2026-03-22 22:42:57] [DEBUG] Registered handler for event 'fix:order:canceled'. Total handlers: 4
+[2026-03-22 22:42:57] [DEBUG] Registered handler for event 'fix:order:rejected'. Total handlers: 5
+[2026-03-22 22:42:57] [INFO] Starting FIX session...
+[2026-03-22 22:42:57] [DEBUG] POST https://papertrade.algotrade.vn/accounting/api/fix-account-info/get-fix-id payload_keys=['username', 'password']
+[2026-03-22 22:42:57] [ERROR] POST https://papertrade.algotrade.vn/accounting/api/fix-account-info/get-fix-id HTTP error
+Traceback (most recent call last):
+  File "C:\Users\khiem\AppData\Local\Programs\Python\Python39\lib\site-packages\paperbroker\rest\rest_session.py", line 98, in post
+    response.raise_for_status()
+  File "C:\Users\khiem\AppData\Local\Programs\Python\Python39\lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 502 Server Error: Bad Gateway for url: https://papertrade.algotrade.vn/accounting/api/fix-account-info/get-fix-id status_code=502 response_text=<html>
+<head><title>502 Bad Gateway</title></head>
+<body>
+<center><h1>502 Bad Gateway</h1></center>
+<hr><center>nginx/1.18.0 (Ubuntu)</center>
+</body>
+</html>
+
+[2026-03-22 22:42:57] [ERROR] event=fix_id_fetch_failed username=Group08 error=502 Server Error: Bad Gateway for url: https://papertrade.algotrade.vn/accounting/api/fix-account-info/get-fix-id endpoint=/api/fix-account-info/get-fix-id
+[2026-03-22 22:42:57] [WARNING] event=account_id_not_resolved_on_connect username=Group08
+[2026-03-22 22:42:57] [INFO] Subscribed to HNXDS:VN30F2603 (topic: real.HNXDS.VN30F2603)
+[2026-03-22 22:42:57] [INFO] Starting Kafka consumer for topics: ['real.HNXDS.VN30F2603']
+[2026-03-22 22:42:58] [INFO] Kafka consumer thread started
+[2026-03-22 22:42:58] [INFO] Kafka consumer started
