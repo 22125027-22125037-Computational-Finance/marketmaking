@@ -1,0 +1,335 @@
+Metadata-Version: 2.4
+Name: paperbroker-client
+Version: 0.2.2
+Summary: Python client for PaperBroker
+Author-email: LoiTran <loi.tran@algotrade.vn>
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: quickfix>=1.15.1
+Requires-Dist: requests>=2.32.0
+Requires-Dist: redis>=4.5.0
+Requires-Dist: kafka-python-ng>=2.2.0
+Requires-Dist: python-dotenv>=1.0.0
+
+# PaperBroker Client
+
+Python client library for algorithmic trading via FIX protocol with event-driven architecture.
+
+## Overview
+
+This package provides a high-level trading client that combines:
+
+- **FIX 4.4 Protocol** for order execution
+- **REST API** for account queries and market data
+- **Event-Driven Architecture** for real-time notifications
+- **Multi-Account Support** with context-aware switching
+- **Async Market Data** via Redis pub/sub
+
+> **Platform Note:** Currently optimized for Linux. Known issues on Apple Silicon (M1/M2/M3) due to QuickFIX binary compatibility.
+
+## Key Features
+
+- **Automatic Configuration** – QuickFIX config files generated automatically from connection parameters
+- **Event-Based Design** – Subscribe to order fills, logon events, and market updates without polling
+- **Thread-Safe Operations** – All public methods safe for concurrent use
+- **Context Manager Support** – Clean resource management with `with` statements
+- **Sub-Account Management** – Switch trading accounts seamlessly with context managers
+- **Real-Time Market Data** – Async/await Redis client for quotes and order book depth
+- **Comprehensive Logging** – Structured logging with file and console output options
+
+## Installation
+
+```bash
+pip install paperbroker-client
+```
+
+For market data support:
+
+```bash
+pip install 'redis[asyncio]>=5.0.0'
+```
+
+## Quick Start
+
+### Basic Trading Session
+
+```python
+import os
+from dotenv import load_dotenv
+from paperbroker import PaperBrokerClient
+
+load_dotenv()
+
+# Create client with automatic configuration
+client = PaperBrokerClient(
+    default_sub_account=os.getenv("PAPER_ACCOUNT_ID"),
+    username=os.getenv("FIX_USERNAME"),
+    password=os.getenv("FIX_PASSWORD"),
+    socket_connect_host=os.getenv("SOCKET_HOST"),
+    socket_connect_port=int(os.getenv("SOCKET_PORT", "5001")),
+    sender_comp_id=os.getenv("SENDER_COMP_ID"),
+    target_comp_id=os.getenv("TARGET_COMP_ID"),
+    rest_base_url=os.getenv("PAPER_REST_BASE_URL")
+)
+
+# Subscribe to events
+def on_logon(session_id, **kw):
+    print(f"Connected: {session_id}")
+
+client.on("fix:logon", on_logon)
+
+# Connect and trade
+client.connect()
+
+if client.wait_until_logged_on(timeout=10):
+    # Query balance
+    balance = client.get_cash_balance()
+    print(f"Available: {balance['remainCash']:,.0f}")
+    
+    # Place order
+    order_id = client.place_order(
+        full_symbol="HNXDS:VN30F2511",
+        side="BUY",
+        qty=1,
+        price=1950.0
+    )
+    print(f"Order placed: {order_id}")
+else:
+    error = client.last_logon_error()
+    print(f"Connection failed: {error}")
+```
+
+### Event-Driven Order Tracking
+
+```python
+from threading import Event as ThreadEvent
+
+# Order tracker
+order_done = ThreadEvent()
+
+def on_order_filled(cl_ord_id, last_px, last_qty, **kw):
+    print(f"Filled: {last_qty} @ {last_px}")
+    order_done.set()
+
+# Subscribe to fill events
+client.on("fix:order:filled", on_order_filled)
+
+# Place order
+order_id = client.place_order(
+    full_symbol="HNXDS:VN30F2511",
+    side="BUY",
+    qty=1,
+    price=1950.0
+)
+
+# Wait for fill (non-blocking!)
+if order_done.wait(timeout=30):
+    print("Order completed")
+```
+
+### Market Data Streaming
+
+```python
+import asyncio
+import os
+from dotenv import load_dotenv
+from paperbroker.market_data import RedisMarketDataClient
+
+load_dotenv()
+
+async def main():
+    # Create market data client
+    client = RedisMarketDataClient(
+        host=os.getenv("MARKET_REDIS_HOST"),
+        port=int(os.getenv("MARKET_REDIS_PORT", "6379")),
+        password=os.getenv("MARKET_REDIS_PASSWORD"),
+        merge_updates=True  # Full snapshots on every update
+    )
+    
+    # Define callback
+    def on_quote(instrument, quote):
+        print(f"{instrument}: {quote.latest_matched_price}")
+        print(f"  Bid: {quote.bid_price_1} x {quote.bid_quantity_1}")
+        print(f"  Ask: {quote.ask_price_1} x {quote.ask_quantity_1}")
+    
+    # Subscribe to real-time updates
+    await client.subscribe("HNXDS:VN30F2511", on_quote)
+    
+    # Keep running
+    try:
+        while True:
+            await asyncio.sleep(1)
+    finally:
+        await client.close()
+
+asyncio.run(main())
+```
+
+### Multi-Account Trading
+
+```python
+# Use context manager for temporary account switching
+with client.use_sub_account("D1"):
+    # This order uses D1 account
+    client.place_order("HNXDS:VN30F2511", "SELL", 1, 1950.0)
+
+with client.use_sub_account("D2"):
+    # This order uses D2 account
+    client.place_order("HNXDS:VN30F2511", "BUY", 1, 1950.0)
+
+# Restores to default account after context exits
+```
+
+## Environment Variables
+
+Configure connection via environment variables in `.env` file:
+
+```bash
+# FIX Connection
+SOCKET_HOST=<your-fix-server>
+SOCKET_PORT=<port>
+SENDER_COMP_ID=<your-sender-id>
+TARGET_COMP_ID=<server-target-id>
+
+# Credentials (keep secure, never commit)
+FIX_USERNAME=<your-username>
+FIX_PASSWORD=<your-password>
+
+# REST API
+PAPER_REST_BASE_URL=<your-rest-api-url>
+
+# Market Data (Redis)
+MARKET_REDIS_HOST=<your-redis-host>
+MARKET_REDIS_PORT=<port>
+MARKET_REDIS_PASSWORD=<your-redis-password>
+
+# Market Data (Kafka)
+PAPERBROKER_KAFKA_BOOTSTRAP_SERVERS=<your-kafka-server>:<port>
+PAPERBROKER_KAFKA_USERNAME=<your-username>
+PAPERBROKER_KAFKA_PASSWORD=<your-password>
+PAPERBROKER_ENV_ID=<environment-id>  # e.g., 'real', 'test'
+
+# Trading Account
+PAPER_ACCOUNT_ID=<your-sub-account-id>
+```
+
+> ⚠️ **Security:** Never commit `.env` files with real credentials. Add `.env` to `.gitignore`.
+
+## Core Components
+
+### PaperBrokerClient
+
+Main entry point combining FIX and REST operations:
+
+**Lifecycle:**
+- `connect()` – Start FIX session and REST authentication
+- `disconnect()` – Stop FIX session and close connections
+- `wait_until_logged_on(timeout)` – Block until ready
+- `is_logged_on()` – Check if FIX session is active
+- `last_logon_error()` – Get last authentication error
+
+**Order Management (FIX):**
+- `place_order(full_symbol, side, qty, price, ord_type, tif)` – Submit new order
+- `cancel_order(cl_ord_id, timeout)` – Cancel existing order
+- `get_order_status(cl_ord_id)` – Get order status
+
+**Account Queries (REST):**
+- `get_cash_balance()` – Query available cash
+- `get_account_balance()` – Query total balance
+- `get_portfolio_by_sub(sub_account_id)` – Get portfolio positions with PnL
+- `get_orders(start_date, end_date, sub_account_id)` – Get orders in date range
+- `get_transactions_by_date(start_date, end_date, sub_account_id)` – Get transaction history
+- `get_max_placeable(symbol, price, side, sub_account_id)` – Calculate max order quantity
+- `get_stock_orders()` – Query stock orders
+- `get_derivative_orders()` – Query derivative orders
+
+**Sub-Account:**
+- `use_sub_account(sub_id)` – Context manager for account switching
+- `set_default_sub_account(sub_id)` – Change default sub-account
+- `current_sub_account()` – Get current active sub-account
+
+**Events:**
+- `on(event, handler)` – Subscribe to events
+- `off(event, handler)` – Unsubscribe from events
+
+### RedisMarketDataClient
+
+Async client for real-time market data:
+
+- `query(instrument)` – Get current quote snapshot
+- `subscribe(instrument, callback)` – Stream real-time updates
+- `close()` – Clean up connections
+
+### Event System
+
+Subscribe to lifecycle and trading events:
+
+**Session Events:**
+- `fix:logon` – FIX session established
+- `fix:logout` – FIX session disconnected
+- `fix:logon_error` – Authentication failed
+- `fix:reject` – FIX message rejected by server
+
+**Order Events:**
+- `fix:order:accepted` – Order accepted by exchange
+- `fix:order:filled` – Order fully or partially filled
+- `fix:order:canceled` – Order cancellation confirmed
+- `fix:order:rejected` – Order rejected
+
+**Account Events:**
+- `account:switch` – Sub-account changed
+
+**System Events:**
+- `event:handler_error` – Handler exception occurred
+
+## Next Steps
+
+- **[Configuration Guide](./config-guide.md)** – Detailed configuration options and best practices
+- **[Event System Guide](./event-guide.md)** – Advanced event handling patterns
+- **[Market Data Guide](./market-data-guide.md)** – Market data streaming and quote structures
+
+## Examples
+
+The package includes 10 working examples:
+
+| Example | Description |
+|---------|-------------|
+| `01_simple_login.py` | Basic connection and authentication |
+| `02_cancel_order.py` | Order placement and cancellation |
+| `03_cross_matching.py` | Multi-account cross-matching |
+| `04_cross_matching_advanced.py` | Advanced cross-matching scenarios |
+| `05_market_data_query.py` | Market data query mode (Redis) |
+| `06_market_data_subscribe.py` | RAW subscription mode (delta updates) |
+| `07_market_data_subscribe_merged.py` | MERGED subscription mode (full snapshots) |
+| `08_account_portfolio_orders.py` | Portfolio and orders queries |
+| `09_account_transactions.py` | Transaction history & order mapping |
+| `10_max_placeable.py` | Risk management & position sizing |
+| `11_market_data_kafka.py` | Market data via Kafka streaming |
+
+Run examples:
+
+```bash
+python examples/01_simple_login.py
+python examples/11_market_data_kafka.py
+```
+
+## Thread Safety
+
+All public API methods are thread-safe:
+
+- Event handlers called synchronously from emitter threads
+- Avoid blocking operations in handlers
+- Sub-account context uses `ContextVar` for thread isolation
+
+## Requirements
+
+- Python 3.8+
+- quickfix >= 1.15.1
+- requests >= 2.32.0
+- python-dotenv >= 1.0.0
+- redis >= 4.5.0 (optional, for Redis market data)
+- kafka-python-ng >= 2.2.0 (optional, for Kafka market data)
+
+## License
+
+See LICENSE file for details.

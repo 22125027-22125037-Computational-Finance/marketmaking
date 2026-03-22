@@ -42,7 +42,8 @@ from backtesting import PredictiveRSIMarketMaker
 
 try:
     # Adjust this import path if your SDK exposes classes from a different module.
-    from paperbroker import KafkaMarketDataClient, PaperBrokerClient
+    from paperbroker.client import PaperBrokerClient
+    from paperbroker.market_data import KafkaMarketDataClient, QuoteSnapshot
 except ImportError as exc:  # pragma: no cover - runtime dependency
     raise ImportError(
         "Could not import PaperBrokerClient/KafkaMarketDataClient. "
@@ -159,19 +160,18 @@ class LiveTradingEngine:
         kwargs = {
             "username": self.username,
             "password": self.password,
-            "sub_account": self.sub_account,
+            "default_sub_account": self.sub_account,
             "socket_connect_host": self.socket_connect_host,
             "socket_connect_port": self.socket_connect_port,
             "sender_comp_id": self.sender_comp_id,
+            "rest_base_url": os.getenv("PAPER_REST_BASE_URL", "https://papertrade.algotrade.vn/accounting"),
         }
         return PaperBrokerClient(**kwargs)
 
     def _build_kafka_client(self) -> Any:
         kwargs = {
             "bootstrap_servers": self._require_env("PAPERBROKER_KAFKA_BOOTSTRAP_SERVERS"),
-            "topic": os.getenv("PAPERBROKER_KAFKA_TOPIC", "quotes"),
-            "group_id": os.getenv("PAPERBROKER_KAFKA_GROUP_ID", "paper-trading"),
-            "client_id": os.getenv("PAPERBROKER_KAFKA_CLIENT_ID", "paper-trading-engine"),
+            "env_id": os.getenv("PAPERBROKER_ENV_ID", "real"),
             "merge_updates": True,
         }
         kafka_username = os.getenv("PAPERBROKER_KAFKA_USERNAME")
@@ -190,7 +190,7 @@ class LiveTradingEngine:
         self.client.on("fix:order:rejected", self.on_order_rejected)
 
     def _register_market_data_events(self) -> None:
-        self.market_data_client.on("quote", self.on_quote)
+        pass  # Handled asynchronously in _run_kafka_consumer
 
     def start(self) -> None:
         print("Starting LiveTradingEngine...")
@@ -681,15 +681,13 @@ class LiveTradingEngine:
             self._place_market_order(side="BUY", qty=abs(self.inventory))
 
     async def _run_kafka_consumer(self) -> None:
-        """Start or await Kafka consumer depending on SDK style."""
-        await self._call_client_method_async(self.market_data_client, ("connect",))
-        await self._call_client_method_async(
-            self.market_data_client,
-            ("consume_forever", "consume", "run", "start"),
-        )
+            """Start Kafka consumer and subscribe to the instrument."""
+            print(f"Subscribing to market data for {self.symbol}...")
+            await self.market_data_client.subscribe(self.symbol, self.on_quote)
+            await self.market_data_client.start()
 
-        while not self.trading_halted:
-            await asyncio.sleep(1)
+            while not self.trading_halted:
+                await asyncio.sleep(1)
 
     @staticmethod
     async def _call_client_method_async(client: Any, method_names: Tuple[str, ...]) -> None:

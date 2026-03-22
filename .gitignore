@@ -26,3 +26,4 @@ result/backtest/hpr.svg
 result/backtest/drawdown.svg
 deliverables/strategy_evolution_v2.md
 deliverables/strategy_evolution_v2.md
+__pycache__/backtesting.cpython-39.pyc
