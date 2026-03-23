@@ -107,6 +107,7 @@ class LiveTradingEngine:
         self.realized_pnl = 0.0
         self.last_price: Optional[float] = None
         self.total_trades_executed = 0
+        self.state_heal_count = 0
         self.latest_indicators: Dict[str, Optional[float]] = {
             "rsi": None,
             "adx": None,
@@ -126,6 +127,21 @@ class LiveTradingEngine:
             os.getenv("PAPERBROKER_PORTFOLIO_REFRESH_SECONDS", "3")
         )
         self._last_portfolio_pull = 0.0
+        self._startup_equity_initialized = False
+
+        self.reversal_flatten_cooldown_seconds = float(
+            os.getenv("PAPERBROKER_REVERSAL_FLATTEN_COOLDOWN_SECONDS", "2")
+        )
+        self.reversal_flatten_max_retries = int(
+            os.getenv("PAPERBROKER_REVERSAL_FLATTEN_MAX_RETRIES", "3")
+        )
+        self.reversal_flatten_lockout_seconds = float(
+            os.getenv("PAPERBROKER_REVERSAL_FLATTEN_LOCKOUT_SECONDS", "20")
+        )
+        self.reversal_flatten_state: Dict[str, Dict[str, float]] = {
+            "BUY": {"failures": 0.0, "next_retry_ts": 0.0},
+            "SELL": {"failures": 0.0, "next_retry_ts": 0.0},
+        }
 
         self.client = self._build_fix_client()
         self.market_data_client = self._build_kafka_client()
@@ -235,6 +251,9 @@ class LiveTradingEngine:
             await self.stop_async()
             return
 
+        # Use broker portfolio only once to seed startup capital.
+        self._initialize_startup_equity()
+
         await self._recover_pending_orders_startup()
 
         dashboard_task = asyncio.create_task(self.print_dashboard_loop(), name="dashboard-loop")
@@ -295,8 +314,12 @@ class LiveTradingEngine:
             if self.active_orders.get(side) and self.active_orders[side].cl_ord_id == cl_ord_id:
                 self.active_orders[side] = None
         with self._inflight_lock:
-            if cl_ord_id in self.inflight_market_orders:
-                self.inflight_market_orders.pop(cl_ord_id, None)
+            market_order = self.inflight_market_orders.pop(cl_ord_id, None)
+
+        if market_order and str(market_order.get("tag", "")) == "reversal_flatten":
+            rejected_side = str(market_order.get("side", "")).upper()
+            if rejected_side in {"BUY", "SELL"}:
+                self._mark_reversal_flatten_failure(rejected_side, reason)
 
     def on_order_filled(
         self,
@@ -333,7 +356,15 @@ class LiveTradingEngine:
             if self.active_orders.get(side) and self.active_orders[side].cl_ord_id == cl_ord_id:
                 self.active_orders[side] = None
             with self._inflight_lock:
-                self.inflight_market_orders.pop(cl_ord_id, None)
+                completed_market_order = self.inflight_market_orders.pop(cl_ord_id, None)
+
+            if (
+                completed_market_order
+                and str(completed_market_order.get("tag", "")) == "reversal_flatten"
+            ):
+                completed_side = str(completed_market_order.get("side", "")).upper()
+                if completed_side in {"BUY", "SELL"}:
+                    self._reset_reversal_flatten_state(completed_side)
 
         self._refresh_equity(force_pull=False)
         self._evaluate_kill_switch()
@@ -424,6 +455,7 @@ class LiveTradingEngine:
             print(f"Equity:               {self.current_equity:,.0f} VND")
             print(f"PnL:                  {pnl:,.0f} VND")
             print(f"Total Trades:         {self.total_trades_executed}")
+            print(f"State Heals:          {self.state_heal_count}")
             print(f"RSI(14):              {rsi_str}")
             print(f"ADX(14):              {adx_str}")
             print(f"Dynamic Spread Width: {spread_str}")
@@ -531,6 +563,12 @@ class LiveTradingEngine:
             if self._has_pending_reversal_flatten(side):
                 return
 
+            retry_blocked, retry_reason = self._is_reversal_flatten_retry_blocked(side)
+            if retry_blocked:
+                if retry_reason:
+                    print(retry_reason)
+                return
+
             self._cancel_all_resting_orders()
 
             flatten_qty = abs(self.inventory)
@@ -539,11 +577,16 @@ class LiveTradingEngine:
                 print(
                     f"Flattening {flatten_qty} {current_side} contracts before opening {side}."
                 )
-                self._place_market_order(
+                cl_ord_id = self._place_market_order(
                     side=side,
                     qty=flatten_qty,
                     tag="reversal_flatten",
                 )
+                if not cl_ord_id:
+                    self._mark_reversal_flatten_failure(
+                        side,
+                        "Market flatten placement failed",
+                    )
             # Enforce two-step flip rule: flatten first, open new side only after fills update inventory.
             return
 
@@ -618,19 +661,34 @@ class LiveTradingEngine:
             return ""
 
     def _apply_fill(self, side: str, qty: int, price: float) -> None:
+        if qty <= 0:
+            return
+
+        safe_price = float(price)
+
+        if self.inventory != 0 and self.avg_entry_price is None:
+            self.state_heal_count += 1
+            print(
+                "CRITICAL: Inventory/entry-price invariant broken "
+                f"(inventory={self.inventory}, avg_entry_price=None). "
+                f"Heal count={self.state_heal_count}. "
+                f"Healing state with fill price {safe_price:.2f}."
+            )
+            self.avg_entry_price = safe_price
+
         signed_qty = qty if side == "BUY" else -qty
-        
+
         # Deduct exchange fees immediately upon any fill
         self.realized_pnl -= (qty * self.fee_per_contract)
 
         if self.inventory == 0:
             self.inventory = signed_qty
-            self.avg_entry_price = price
+            self.avg_entry_price = safe_price
             return
 
         if self.inventory > 0 and signed_qty > 0:
             self.avg_entry_price = (
-                (self.avg_entry_price * self.inventory) + (price * signed_qty)
+                (self.avg_entry_price * self.inventory) + (safe_price * signed_qty)
             ) / (self.inventory + signed_qty)
             self.inventory += signed_qty
             return
@@ -639,7 +697,7 @@ class LiveTradingEngine:
             abs_inventory = abs(self.inventory)
             abs_new = abs(signed_qty)
             self.avg_entry_price = (
-                (self.avg_entry_price * abs_inventory) + (price * abs_new)
+                (self.avg_entry_price * abs_inventory) + (safe_price * abs_new)
             ) / (abs_inventory + abs_new)
             self.inventory += signed_qty
             return
@@ -647,40 +705,57 @@ class LiveTradingEngine:
         # Closing/reversing position.
         if self.inventory > 0 and signed_qty < 0:
             closing_qty = min(self.inventory, abs(signed_qty))
-            self.realized_pnl += (price - self.avg_entry_price) * closing_qty * self.contract_multiplier
+            self.realized_pnl += (
+                (safe_price - self.avg_entry_price)
+                * closing_qty
+                * self.contract_multiplier
+            )
             self.inventory -= closing_qty
             remainder = abs(signed_qty) - closing_qty
             if remainder > 0:
                 self.inventory = -remainder
-                self.avg_entry_price = price
+                self.avg_entry_price = safe_price
             elif self.inventory == 0:
                 self.avg_entry_price = None
             return
 
         if self.inventory < 0 and signed_qty > 0:
             closing_qty = min(abs(self.inventory), signed_qty)
-            self.realized_pnl += (self.avg_entry_price - price) * closing_qty * self.contract_multiplier
+            self.realized_pnl += (
+                (self.avg_entry_price - safe_price)
+                * closing_qty
+                * self.contract_multiplier
+            )
             self.inventory += closing_qty
             remainder = signed_qty - closing_qty
             if remainder > 0:
                 self.inventory = remainder
-                self.avg_entry_price = price
+                self.avg_entry_price = safe_price
             elif self.inventory == 0:
                 self.avg_entry_price = None
             return
 
     def _refresh_equity(self, force_pull: bool) -> None:
-        now = time.time()
-        should_pull = force_pull or (now - self._last_portfolio_pull >= self.portfolio_refresh_seconds)
-
-        if should_pull:
-            portfolio_equity = self._pull_equity_from_portfolio()
-            self._last_portfolio_pull = now
-            if portfolio_equity is not None:
-                self.current_equity = portfolio_equity
-                return
-
+        _ = force_pull
         self.current_equity = self._compute_internal_equity()
+
+    def _initialize_startup_equity(self) -> None:
+        if self._startup_equity_initialized:
+            return
+
+        self._startup_equity_initialized = True
+        portfolio_equity = self._pull_equity_from_portfolio()
+        if portfolio_equity is None:
+            print(
+                "Startup portfolio equity unavailable. "
+                f"Using configured initial capital: {self.initial_capital:,.0f} VND"
+            )
+            self.current_equity = self.initial_capital
+            return
+
+        self.initial_capital = float(portfolio_equity)
+        self.current_equity = float(portfolio_equity)
+        print(f"Initialized startup equity from portfolio: {self.current_equity:,.0f} VND")
 
     def _pull_equity_from_portfolio(self) -> Optional[float]:
         try:
@@ -773,6 +848,54 @@ class LiveTradingEngine:
                     return True
         return False
 
+    def _is_reversal_flatten_retry_blocked(self, side: str) -> Tuple[bool, str]:
+        side = side.upper()
+        now = time.time()
+        state = self.reversal_flatten_state.get(side)
+        if state is None:
+            return False, ""
+
+        if now < float(state.get("next_retry_ts", 0.0)):
+            wait_seconds = int(max(1, state["next_retry_ts"] - now))
+            return True, (
+                f"Reversal flatten retry blocked for {side}. "
+                f"Waiting {wait_seconds}s before next attempt."
+            )
+
+        return False, ""
+
+    def _mark_reversal_flatten_failure(self, side: str, reason: str) -> None:
+        side = side.upper()
+        state = self.reversal_flatten_state.get(side)
+        if state is None:
+            return
+
+        failures = int(state.get("failures", 0.0)) + 1
+        state["failures"] = float(failures)
+
+        if failures >= self.reversal_flatten_max_retries:
+            cooldown = self.reversal_flatten_lockout_seconds
+            print(
+                f"Reversal flatten failed {failures} times for {side}. "
+                f"Entering lockout for {cooldown:.0f}s. Last error: {reason}"
+            )
+        else:
+            cooldown = self.reversal_flatten_cooldown_seconds
+            print(
+                f"Reversal flatten failed for {side}. "
+                f"Retry in {cooldown:.0f}s. Error: {reason}"
+            )
+
+        state["next_retry_ts"] = time.time() + cooldown
+
+    def _reset_reversal_flatten_state(self, side: str) -> None:
+        side = side.upper()
+        state = self.reversal_flatten_state.get(side)
+        if state is None:
+            return
+        state["failures"] = 0.0
+        state["next_retry_ts"] = 0.0
+
     async def _recover_pending_orders_startup(self) -> None:
         recover_method = getattr(self.client, "recover_pending_orders", None)
         if recover_method is None:
@@ -843,13 +966,17 @@ class LiveTradingEngine:
         return list(dict.fromkeys(ids))
 
     async def _run_kafka_consumer(self) -> None:
-            """Start Kafka consumer and subscribe to the instrument."""
-            print(f"Subscribing to market data for {self.symbol}...")
+        """Start Kafka consumer and keep lifecycle managed by the SDK."""
+        print(f"Subscribing to market data for {self.symbol}...")
+        try:
             await self.market_data_client.subscribe(self.symbol, self.on_quote)
-            await self.market_data_client.start()
-
-            while not self.trading_halted:
-                await asyncio.sleep(1)
+            start_result = self.market_data_client.start()
+            if inspect.isawaitable(start_result):
+                await start_result
+        except Exception as exc:
+            print(f"Kafka consumer stopped with error: {exc}")
+            self.trading_halted = True
+            raise
 
     @staticmethod
     async def _call_client_method_async(client: Any, method_names: Tuple[str, ...]) -> None:
