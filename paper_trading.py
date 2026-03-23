@@ -30,10 +30,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Deque, Dict, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -68,11 +69,14 @@ class LiveTradingEngine:
     """
 
     def __init__(self) -> None:
-        load_dotenv()
+        # Override stale process-level variables with values from .env.
+        load_dotenv(override=True)
 
-        self.username = self._require_env_any("PAPERBROKER_USERNAME", "PAPER_USERNAME")
-        self.password = self._require_env_any("PAPERBROKER_PASSWORD", "PAPER_PASSWORD")
-        self.sub_account = self._require_env_any("PAPERBROKER_SUB_ACCOUNT", "PAPER_ACCOUNT_ID_D1")
+        self.username = self._require_env_any("PAPER_USERNAME", "PAPERBROKER_USERNAME").strip()
+        self.password = self._require_env_any("PAPER_PASSWORD", "PAPERBROKER_PASSWORD").strip()
+        self.sub_account = self._require_env_any(
+            "PAPER_ACCOUNT_ID_D1", "PAPERBROKER_SUB_ACCOUNT"
+        ).strip()
         self.socket_connect_host = self._require_env_any(
             "PAPERBROKER_SOCKET_CONNECT_HOST", "SOCKET_HOST"
         )
@@ -81,7 +85,7 @@ class LiveTradingEngine:
         )
         self.sender_comp_id = self._require_env_any("PAPERBROKER_SENDER_COMP_ID", "SENDER_COMP_ID")
 
-        self.symbol = self._get_env_any("PAPERBROKER_SYMBOL", "TARGET_SYMBOL") or "VN30F1M"
+        self.symbol = self._get_env_any("TARGET_SYMBOL", "PAPERBROKER_SYMBOL") or "VN30F1M"
         self.order_qty = int(os.getenv("PAPERBROKER_ORDER_QTY", "1"))
         self.contract_multiplier = float(os.getenv("PAPERBROKER_CONTRACT_MULTIPLIER", "100"))
         self.tick_size = float(os.getenv("PAPERBROKER_TICK_SIZE", "0.1"))
@@ -113,7 +117,10 @@ class LiveTradingEngine:
         self.prices: Deque[float] = deque(maxlen=100)
         self.min_points_for_signals = 60
 
-        self.active_orders: Dict[str, ActiveOrder] = {"BUY": None, "SELL": None}
+        self.active_orders: Dict[str, Optional[ActiveOrder]] = {"BUY": None, "SELL": None}
+        # Track market orders because they are not represented in active limit quotes.
+        self.inflight_market_orders: Dict[str, Dict[str, Any]] = {}
+        self._inflight_lock = threading.RLock()
 
         self.portfolio_refresh_seconds = float(
             os.getenv("PAPERBROKER_PORTFOLIO_REFRESH_SECONDS", "3")
@@ -159,14 +166,17 @@ class LiveTradingEngine:
         return {}
 
     def _build_fix_client(self) -> Any:
+        # Forcing isolation test by entirely removing the .env lookups
+        print("Bypassing .env - Forcing hardcoded credentials...")
         kwargs = {
-            "username": self.username,
-            "password": self.password,
-            "default_sub_account": self.sub_account,
-            "socket_connect_host": self.socket_connect_host,
-            "socket_connect_port": self.socket_connect_port,
-            "sender_comp_id": self.sender_comp_id,
-            "rest_base_url": os.getenv("PAPER_REST_BASE_URL", "https://papertrade.algotrade.vn/accounting"),
+            "username": "Group08",
+            "password": "FKaAWHT3Xir8",
+            "default_sub_account": "D1",
+            "socket_connect_host": "papertrade.algotrade.vn",
+            "socket_connect_port": 5001,
+            "sender_comp_id": "9629235d865343419b0dc388bbb34960",
+            "target_comp_id": "SERVER",
+            "rest_base_url": "https://papertrade.algotrade.vn/accounting",
         }
         return PaperBrokerClient(**kwargs)
 
@@ -188,6 +198,7 @@ class LiveTradingEngine:
         self.client.on("fix:logon", self.on_logon)
         self.client.on("fix:logout", self.on_logout)
         self.client.on("fix:order:filled", self.on_order_filled)
+        self.client.on("fix:order:partial_fill", self.on_order_filled)
         self.client.on("fix:order:canceled", self.on_order_canceled)
         self.client.on("fix:order:rejected", self.on_order_rejected)
 
@@ -213,6 +224,19 @@ class LiveTradingEngine:
 
         await self._call_client_method_async(self.client, ("connect", "start"))
 
+        print("Waiting for FIX and REST authentication...")
+        for _ in range(100):  # 10-second timeout
+            if hasattr(self.client, "is_logged_on") and self.client.is_logged_on():
+                break
+            await asyncio.sleep(0.1)
+
+        if hasattr(self.client, "is_logged_on") and not self.client.is_logged_on():
+            print("Authentication timeout. Check your credentials.")
+            await self.stop_async()
+            return
+
+        await self._recover_pending_orders_startup()
+
         dashboard_task = asyncio.create_task(self.print_dashboard_loop(), name="dashboard-loop")
         kafka_task = asyncio.create_task(self._run_kafka_consumer(), name="kafka-consumer")
         trading_task = asyncio.create_task(self._trading_logic_loop(), name="trading-logic")
@@ -220,63 +244,96 @@ class LiveTradingEngine:
         try:
             await asyncio.gather(kafka_task, dashboard_task, trading_task)
         finally:
-            self.stop()
+            await self.stop_async()
 
-    def stop(self) -> None:
+    async def stop_async(self) -> None:
         print("Stopping LiveTradingEngine...")
 
         if hasattr(self.market_data_client, "stop"):
-            self.market_data_client.stop()
+            result = self.market_data_client.stop()
+            if inspect.isawaitable(result):
+                await result
         if hasattr(self.client, "disconnect"):
             self.client.disconnect()
         elif hasattr(self.client, "stop"):
             self.client.stop()
 
-    def on_logon(self, event: Any) -> None:
-        _ = event
-        print("FIX logon successful.")
+    def stop(self) -> None:
+        """Synchronous wrapper for compatibility with non-async callers."""
+        try:
+            asyncio.run(self.stop_async())
+        except RuntimeError:
+            # If already in an event loop, schedule async teardown best-effort.
+            loop = asyncio.get_event_loop()
+            loop.create_task(self.stop_async())
 
-    def on_logout(self, event: Any) -> None:
-        _ = event
-        print("FIX logout received.")
+    def on_logon(self, session_id: str, **kwargs) -> None:
+        _ = kwargs
+        print(f"FIX logon successful. Session: {session_id}")
 
-    def on_order_canceled(self, event: Any) -> None:
-        payload = self._to_dict(event)
-        cl_ord_id = str(payload.get("cl_ord_id") or payload.get("clOrdID") or "")
-        side = self._normalize_side(payload.get("side"))
+    def on_logout(self, session_id: str, reason: Optional[str] = None, **kwargs) -> None:
+        _ = kwargs
+        print(f"FIX logout received. Session: {session_id} | Reason: {reason or 'Normal logout'}")
 
-        if side and self.active_orders.get(side) and self.active_orders[side].cl_ord_id == cl_ord_id:
-            self.active_orders[side] = None
+    def on_order_canceled(
+        self,
+        orig_cl_ord_id: str,
+        status: str,
+        cum_qty: int = 0,
+        **kwargs,
+    ) -> None:
+        _ = (status, cum_qty, kwargs)
+        for side in ("BUY", "SELL"):
+            if self.active_orders.get(side) and self.active_orders[side].cl_ord_id == orig_cl_ord_id:
+                self.active_orders[side] = None
+                print(f"Order canceled: side={side}, cl_ord_id={orig_cl_ord_id}")
 
-    def on_order_rejected(self, event: Any) -> None:
-        payload = self._to_dict(event)
-        side = self._normalize_side(payload.get("side"))
-        cl_ord_id = str(payload.get("cl_ord_id") or payload.get("clOrdID") or "")
-        reason = payload.get("reason") or payload.get("text") or "unknown"
+    def on_order_rejected(self, cl_ord_id: str, reason: str, status: str, **kwargs) -> None:
+        _ = (status, kwargs)
+        print(f"Order rejected: cl_ord_id={cl_ord_id}, reason={reason}")
+        for side in ("BUY", "SELL"):
+            if self.active_orders.get(side) and self.active_orders[side].cl_ord_id == cl_ord_id:
+                self.active_orders[side] = None
+        with self._inflight_lock:
+            if cl_ord_id in self.inflight_market_orders:
+                self.inflight_market_orders.pop(cl_ord_id, None)
 
-        print(f"Order rejected: side={side}, cl_ord_id={cl_ord_id}, reason={reason}")
+    def on_order_filled(
+        self,
+        cl_ord_id: str,
+        status: str,
+        last_px: float,
+        last_qty: int,
+        cum_qty: Optional[int] = None,
+        avg_px: Optional[float] = None,
+        **kwargs,
+    ) -> None:
+        _ = (cum_qty, avg_px, kwargs)
 
-        if side and self.active_orders.get(side) and self.active_orders[side].cl_ord_id == cl_ord_id:
-            self.active_orders[side] = None
+        side = None
+        if self.active_orders.get("BUY") and self.active_orders["BUY"].cl_ord_id == cl_ord_id:
+            side = "BUY"
+        elif self.active_orders.get("SELL") and self.active_orders["SELL"].cl_ord_id == cl_ord_id:
+            side = "SELL"
+        else:
+            with self._inflight_lock:
+                market_order = self.inflight_market_orders.get(cl_ord_id)
+            if market_order is not None:
+                side = str(market_order.get("side", "")).upper()
 
-    def on_order_filled(self, event: Any) -> None:
-        payload = self._to_dict(event)
-
-        side = self._normalize_side(payload.get("side"))
-        qty = int(payload.get("filled_qty") or payload.get("last_qty") or payload.get("qty") or 0)
-        fill_price_raw = payload.get("fill_price") or payload.get("last_px") or payload.get("price")
-
-        if side is None or qty <= 0 or fill_price_raw is None:
-            print(f"Ignored malformed fill event: {payload}")
+        if not side:
+            print(f"Ignored fill for untracked order: {cl_ord_id}")
             return
 
-        fill_price = float(fill_price_raw)
-        self._apply_fill(side=side, qty=qty, price=fill_price)
-        self.total_trades_executed += qty
+        fill_qty = int(last_qty)
+        self._apply_fill(side=side, qty=fill_qty, price=last_px)
+        self.total_trades_executed += fill_qty
 
-        cl_ord_id = str(payload.get("cl_ord_id") or payload.get("clOrdID") or "")
-        if side and self.active_orders.get(side) and self.active_orders[side].cl_ord_id == cl_ord_id:
-            self.active_orders[side] = None
+        if status == "FILLED":
+            if self.active_orders.get(side) and self.active_orders[side].cl_ord_id == cl_ord_id:
+                self.active_orders[side] = None
+            with self._inflight_lock:
+                self.inflight_market_orders.pop(cl_ord_id, None)
 
         self._refresh_equity(force_pull=False)
         self._evaluate_kill_switch()
@@ -470,6 +527,26 @@ class LiveTradingEngine:
         if side == "SELL" and self.inventory <= -self.max_inventory:
             return
 
+        if self._requires_flatten_before_reversal(side):
+            if self._has_pending_reversal_flatten(side):
+                return
+
+            self._cancel_all_resting_orders()
+
+            flatten_qty = abs(self.inventory)
+            if flatten_qty > 0:
+                current_side = "short" if self.inventory < 0 else "long"
+                print(
+                    f"Flattening {flatten_qty} {current_side} contracts before opening {side}."
+                )
+                self._place_market_order(
+                    side=side,
+                    qty=flatten_qty,
+                    tag="reversal_flatten",
+                )
+            # Enforce two-step flip rule: flatten first, open new side only after fills update inventory.
+            return
+
         normalized_price = self._normalize_price(target_price)
 
         if existing is not None and abs(existing.price - normalized_price) < (self.tick_size / 2):
@@ -514,20 +591,31 @@ class LiveTradingEngine:
             print(f"Failed to place limit order: {exc}")
             return ""
 
-    def _place_market_order(self, side: str, qty: int) -> None:
+    def _place_market_order(self, side: str, qty: int, tag: str = "") -> str:
         if qty <= 0:
-            return
+            return ""
 
         try:
-            self.client.place_order(
+            cl_ord_id = self.client.place_order(
                 full_symbol=self.symbol,
                 side=side.upper(),
                 qty=qty,
                 price=0.0,
                 ord_type="MARKET",
             )
+            if cl_ord_id is not None:
+                cl_ord_id_str = str(cl_ord_id)
+                with self._inflight_lock:
+                    self.inflight_market_orders[cl_ord_id_str] = {
+                        "side": side.upper(),
+                        "qty": qty,
+                        "tag": tag,
+                    }
+                return cl_ord_id_str
+            return ""
         except Exception as exc:
             print(f"Failed to place market order: {exc}")
+            return ""
 
     def _apply_fill(self, side: str, qty: int, price: float) -> None:
         signed_qty = qty if side == "BUY" else -qty
@@ -596,12 +684,7 @@ class LiveTradingEngine:
 
     def _pull_equity_from_portfolio(self) -> Optional[float]:
         try:
-            payload = self.client.get_portfolio_by_sub(sub_account=self.sub_account)
-        except TypeError:
-            try:
-                payload = self.client.get_portfolio_by_sub(self.sub_account)
-            except Exception:
-                return None
+            payload = self.client.get_portfolio_by_sub(sub_account_id=self.sub_account)
         except Exception:
             return None
 
@@ -674,6 +757,90 @@ class LiveTradingEngine:
             self._place_market_order(side="SELL", qty=abs(self.inventory))
         else:
             self._place_market_order(side="BUY", qty=abs(self.inventory))
+
+    def _requires_flatten_before_reversal(self, side: str) -> bool:
+        if side == "BUY" and self.inventory < 0:
+            return True
+        if side == "SELL" and self.inventory > 0:
+            return True
+        return False
+
+    def _has_pending_reversal_flatten(self, side: str) -> bool:
+        side = side.upper()
+        with self._inflight_lock:
+            for order in self.inflight_market_orders.values():
+                if str(order.get("tag", "")) == "reversal_flatten" and str(order.get("side", "")) == side:
+                    return True
+        return False
+
+    async def _recover_pending_orders_startup(self) -> None:
+        recover_method = getattr(self.client, "recover_pending_orders", None)
+        if recover_method is None:
+            return
+
+        try:
+            recovered_payload = recover_method()
+            if inspect.isawaitable(recovered_payload):
+                recovered_payload = await recovered_payload
+        except Exception as exc:
+            print(f"Pending-order recovery failed: {exc}")
+            return
+
+        recovered_ids = self._extract_recovered_order_ids(recovered_payload)
+        if not recovered_ids:
+            print("No pending orders recovered from previous session.")
+            return
+
+        print(
+            f"Recovered {len(recovered_ids)} pending orders from previous session. "
+            "Canceling before live loops start..."
+        )
+        for cl_ord_id in recovered_ids:
+            self._cancel_order(cl_ord_id)
+
+    @staticmethod
+    def _extract_recovered_order_ids(payload: Any) -> List[str]:
+        ids: List[str] = []
+
+        if payload is None:
+            return ids
+
+        if isinstance(payload, str):
+            return [payload]
+
+        if isinstance(payload, (list, tuple, set)):
+            for item in payload:
+                if isinstance(item, str):
+                    ids.append(item)
+                elif isinstance(item, dict):
+                    cl_ord_id = item.get("cl_ord_id") or item.get("ClOrdID") or item.get("id")
+                    if cl_ord_id:
+                        ids.append(str(cl_ord_id))
+            return ids
+
+        if isinstance(payload, dict):
+            for key in ("cl_ord_id", "ClOrdID", "id"):
+                value = payload.get(key)
+                if value:
+                    ids.append(str(value))
+
+            for key in ("orders", "pending_orders", "items", "data"):
+                nested = payload.get(key)
+                if isinstance(nested, list):
+                    for item in nested:
+                        if isinstance(item, str):
+                            ids.append(item)
+                        elif isinstance(item, dict):
+                            cl_ord_id = (
+                                item.get("cl_ord_id")
+                                or item.get("ClOrdID")
+                                or item.get("id")
+                            )
+                            if cl_ord_id:
+                                ids.append(str(cl_ord_id))
+
+        # Keep order while removing duplicates.
+        return list(dict.fromkeys(ids))
 
     async def _run_kafka_consumer(self) -> None:
             """Start Kafka consumer and subscribe to the instrument."""
