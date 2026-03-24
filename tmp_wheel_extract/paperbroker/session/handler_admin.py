@@ -85,16 +85,22 @@ class AdminHandler:
               and heartbeat fields
             - All messages get username and current sub-account
         """
-        msg_type = message.getHeader().getField(fix.MsgType()).getString()
+        msg_type_field = fix.MsgType()
+        message.getHeader().getField(msg_type_field)
+        msg_type = msg_type_field.getValue()
         
+        username = str(self.username).strip()
+        password = str(self.password).strip()
+
         # Inject logon-specific fields
         if msg_type == "A":  # Logon message
-            message.setField(fix.Password(self.password))
+            message.setField(fix.StringField(553, username))
+            message.setField(fix.StringField(554, password))
             message.setField(fix.EncryptMethod(0))  # No encryption
             message.setField(fix.HeartBtInt(30))  # 30 second heartbeat
-        
+
         # Add common fields to all admin messages
-        message.setField(fix.Username(self.username))
+        message.setField(fix.StringField(553, username))
         message.setField(fix.Account(self.sub_provider.current()))
         
         self.logger.debug(f"[TO ADMIN] {message}")

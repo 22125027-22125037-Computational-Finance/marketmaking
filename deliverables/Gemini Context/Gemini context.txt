@@ -1,0 +1,117 @@
+I have gone through the final version of your paper_trading.py script with a fine-tooth comb. I examined the async task lifecycle, the concurrency locks, and manually traced the mathematics for inventory scaling and PnL realization.
+I can confidently say your code is clean, robust, and mathematically sound. Copilot implemented the hardening passes flawlessly.
+Here is the final bill of health for your trading logic:
+Fill Mathematics & Invariants: The _apply_fill method now correctly casts all incoming prices to floats before touching any math operations. Your weighted average entry price logic for scaling into positions, and the exact VND multiplier calculations for scaling out of them, are perfectly accurate. The defensive remainder logic will gracefully handle any rare over-fills from the exchange without corrupting your state.
+The Reversal Deadlock: The _is_reversal_flatten_retry_blocked logic prevents the infinite market-order spam loop we discussed earlier. It correctly uses the next_retry_ts to impose a cooldown, meaning a rejected flatten attempt will no longer choke your engine.
+Single Source of Truth: By isolating the REST API call to _initialize_startup_equity() and completely relying on _compute_internal_equity() for the live loop, you have eliminated the double-counting PnL bug.
+Auto-Shutdown (Kill Switch): The way your _evaluate_kill_switch integrates with the asyncio.gather loop is excellent. If your equity breaches the 400M VND floor, flipping trading_halted = True will cause the dashboard and trading loops to exit, allowing the finally block to trigger a clean, automatic teardown of the FIX and Kafka connections.
+Your architecture is in exceptional shape. You have built a highly resilient, event-driven market-making engine that can handle network drops, race conditions, and toxic market flow.
+You are completely clear to copy the intricate context block we generated earlier and paste it into a fresh chat to continue. Would you like me to do anything else for this specific codebase before you migrate?
+
+
+Here is the complete, deeply intricate, and heavily detailed context sheet for your quantitative trading project. It captures every architectural decision, mathematical formula, risk parameter, and recent bug fix we've established.
+You can copy and paste everything below the line into your new chat to instantly bring me (or another instance) up to speed.
+📋 PROJECT CONTEXT: High-Frequency Market Making System (VN30F1M)
+1. Project Objective & Market
+Target Asset: Vietnamese Index Futures (VN30F1M). Currently trading the front-month contract (HNXDS:VN30F2604).
+Environment: PaperBroker Live Paper Trading (Step 7).
+Exchange Hours Constraint: System will trigger a FIX 35=5 Normal Logout outside of HOSE derivatives trading hours (08:45 - 11:30 and 13:00 - 14:45 GMT+7).
+2. Alpha Strategy: Predictive Regime-Aware Market Maker
+The engine pivoted from a pure continuous-time Avellaneda-Stoikov framework (which suffered a -97% drawdown due to toxic discrete-book adverse selection) to a momentum-gated, predictive regime model.
+Asymmetric Quoting (RSI): Uses a 14-period Pandas rolling RSI.
+Oversold (< 30): Restricts to Bid quotes only.
+Overbought (> 70): Restricts to Ask quotes only.
+Regime Circuit Breaker (ADX/EMA): Uses a 14-period ADX and 12/26 EMA crossover. If $\text{ADX} > 25$ (indicating a strong directional trend), the engine physically blocks counter-trend liquidity provision to avoid being run over.
+Volatility-Adaptive Spreads: Static spreads are replaced with an ATR-driven formula:
+$$\text{dynamic\_spread} = \max(\text{ATR}_{14} \times 0.5, 0)$$
+3. Strict Risk Management
+Inventory Cap: Hard limit of $\pm 5$ contracts.
+Stop-Loss Flush: Intraday adverse excursion limit of 10.0 index points instantly market-orders out of the toxic position.
+Exchange Fees: The engine mathematically deducts 40,000 VND (0.4 index points) per contract upon every fill to track true realized PnL.
+Global Kill Switch: Starts with 500,000,000 VND equity. If equity drops below 400,000,000 VND, the system cancels all resting limit orders, flattens inventory via market orders, and sets self.trading_halted = True.
+4. Software Engineering & Execution Architecture (paper_trading.py)
+Environment: Python 3.9 (Strictly constrained to Python 3.9 to utilize a precompiled quickfix-1.15.1-cp39 wheel, bypassing MSVC C++ compilation failures on Windows).
+SDK: paperbroker_client v0.2.4.
+Connectivity (Microservices):
+Market Data: KafkaMarketDataClient connecting to 52.77.119.94:9092.
+Execution: FIX 4.4 engine via PaperBrokerClient TCP socket at papertrade.algotrade.vn:5001.
+Accounting: REST API via https://papertrade.algotrade.vn/accounting.
+Concurrency Model (Decoupled Async): * To prevent tick lag, the Kafka consumer's on_quote callback ONLY appends the latest_matched_price to a bounded collections.deque(maxlen=100).
+A separate _trading_logic_loop task runs asynchronously every 0.1 seconds to compute Pandas indicators and generate/replace limits.
+A print_dashboard_loop runs every 10 seconds.
+Synchronization Barrier: start_async implements a polling loop checking client.is_logged_on() to prevent race conditions where the trading loop fires before the REST API fetches the authentication token.
+5. Execution Rules & Recent Logic Patches
+Flatten-Before-Flip Rule: Compliant with exchange rules. If the engine is holding Short and the RSI signals a Long entry, _replace_order_if_needed intercepts the request, cancels resting limits, and sends a market order to flatten the inventory to zero before allowing new opening limit orders.
+In-Flight Market Order Lock: To prevent the engine from spamming market flatten orders on every 0.1s tick while waiting for exchange fills, a strict threading.Lock protects an inflight_market_orders dictionary.
+Crash Recovery (SQLite): Leverages SDK v0.2.4 persistence. On startup, client.recover_pending_orders() executes immediately after logon to hunt down and cancel orphaned limit orders from previous crashes.
+Local SDK Patch: Because the environment is locked to Python 3.9, lines 313 and 332 in the local paperbroker/client.py SDK were manually patched to remove Python 3.10+ union type hinting (float | None -> Optional[float]), preventing fatal TypeError crashes.
+6. Current Status
+REST API 502 Bad Gateway / 401 errors have been resolved by the exchange admins.
+Target symbol rolled forward to HNXDS:VN30F2604.
+Environment .env is fully parsed dynamically (hardcoded isolation tests removed).
+The engine is structurally complete, deeply hardened against race conditions, and is currently waiting for the 08:45 AM HOSE market open to begin live quoting.
+That should give any fresh chat instance the exact, hyper-detailed blueprint of where we left off.
+Before you copy this over, would you like me to dump the finalized, fully patched version of your paper_trading.py script into a single code block so you have the absolute latest codebase ready to pair with this context?
+
+
+1. Get some context as to how to connect to the server, I am using Kafka, I am not using Redis.
+2. What other files do I have to give to you?
+
+Để kết nối papertrade các bạn dùng config sau. Có thể test nhanh bằng  Example 01_simple_login.py. Set console=True để thấy full debug log của fix.
+socket_connect_host=papertrade.algotrade.vn
+socket_connect_port=5001
+rest_base_url=https://papertrade.algotrade.vn/accounting
+target_comp_id=SERVER
+
+Để lấy dữ liệu orderbook trong giờ giao dịch các bạn dùng 1 trong 2 config sau.
+PAPERBROKER_KAFKA_BOOTSTRAP_SERVERS=52.77.119.94:9092
+PAPERBROKER_KAFKA_USERNAME=username
+PAPERBROKER_KAFKA_PASSWORD=password
+PAPERBROKER_ENV_ID=real
+
+MARKET_REDIS_HOST=52.76.242.46
+MARKET_REDIS_PORT=6380
+MARKET_REDIS_PASSWORD=Vn9ZMBF5SLafGkqEWc4h3b
+Tham khảo example 06_market_data_subscribe và 07_market_data_subscribe_merged nếu dùng redis hoặc 11_market_data_kafka nếu dùng kafka. I am using Kafka, I am not using Redis.
+
+Về dữ liệu mẫu sẽ được trả về thì các bạn tham khảo ở 3 file này:
+kafka : kafka.json {
+	"instrument": "HNXDS:VN30F2603",
+	"entries": {
+		"latest_matched_quantity": 1,
+		"foreign_buy_quantity": 3402,
+		"lowest_price": 1905.5,
+		"bid_quantity_3": 11,
+		"highest_price": 1931.0,
+		"bid_quantity_2": 28,
+		"total_matched_quantity": 115046,
+		"latest_matched_price": 1921.8,
+		"close_price": 1924.4,
+		"bid_price_3": 1921.7,
+		"bid_price_2": 1921.8,
+		"bid_price_1": 1921.9,
+		"foreign_sell_quantity": 3331,
+		"ref_price": 1924.4,
+		"open_price": 1916.7,
+		"ask_quantity_3": 13,
+		"ask_quantity_2": 2,
+		"ask_quantity_1": 1,
+		"latest_estimated_matched_price": 1921.8,
+		"bid_quantity_1": 2,
+		"ceiling_price": 2059.1,
+		"floor_price": 1789.7,
+		"ask_price_1": 1922,
+		"ask_price_2": 1922.3,
+		"ask_price_3": 1922.5
+	}
+}
+
+Credential để các bạn log vào Paper Trading Server ở đây nha:
+Username: Group08
+Password: FKaAWHT3Xir8
+Trader ID: 9629235d865343419b0dc388bbb34960
+FIX SenderCompID: 9629235d865343419b0dc388bbb34960
+
+
+
+Write a small test_paper_trading.py to buy 1 long contract and then close position (buy 1 short contract 2 minutes later), remember to print out all the assets, equity, number of tradings,....
