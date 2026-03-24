@@ -28,6 +28,7 @@ Environment variables used:
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 import inspect
 import os
 import threading
@@ -225,6 +226,14 @@ class LiveTradingEngine:
             or "https://papertrade.algotrade.vn/accounting",
             "log_dir": log_dir,
         }
+
+        # Newer SDK versions support disabling persistent order store.
+        try:
+            if "order_store_path" in inspect.signature(PaperBrokerClient.__init__).parameters:
+                kwargs["order_store_path"] = None
+        except (TypeError, ValueError):
+            pass
+
         return PaperBrokerClient(**kwargs)
 
     def _build_kafka_client(self) -> Any:
@@ -284,6 +293,10 @@ class LiveTradingEngine:
 
         # Use broker portfolio only once to seed startup capital.
         self._initialize_startup_equity()
+        if self.trading_halted:
+            print("Startup checks failed. Trading engine halted before loop startup.")
+            await self.stop_async()
+            return
 
         await self._recover_pending_orders_startup()
 
@@ -819,22 +832,95 @@ class LiveTradingEngine:
             return
 
         self._startup_equity_initialized = True
-        portfolio_equity = self._pull_equity_from_portfolio()
-        if portfolio_equity is None:
-            print(
-                "Startup portfolio equity unavailable. "
-                f"Using configured initial capital: {self.initial_capital:,.0f} VND"
+        print("\n" + "-" * 40)
+        print("Account Identity and Mapping Check")
+        print("-" * 40)
+        print(f"FIX SenderCompID (Tag 49): {self.sender_comp_id}")
+        print(f"Target Sub-Account:        {self.sub_account}")
+
+        try:
+            # Query equity using the same REST endpoint validated in test script.
+            sub_scope = (
+                self.client.use_sub_account(self.sub_account)
+                if hasattr(self.client, "use_sub_account")
+                else nullcontext()
             )
+            with sub_scope:
+                payload = self.client.get_account_balance()
+
+            if isinstance(payload, dict) and payload.get("success") is False:
+                raise ValueError(f"SDK internal REST error: {payload.get('error')}")
+
+            print("REST Mapping Check:        SUCCESS")
+        except Exception as exc:
+            resolved_fix_id = None
+            account_client = getattr(self.client, "account_client", None)
+            if account_client is not None:
+                resolved_fix_id = getattr(account_client, "ID", None)
+
+            if resolved_fix_id:
+                print(f"REST fixAccountID:         {resolved_fix_id}")
+            print("REST Mapping Check:        FAILED")
+            print(f"Error Details:             {exc}")
+            print("")
+            print("CRITICAL: Backend account mapping appears desynced.")
+            print("REST does not recognize this FIX identity + sub-account pair.")
+            print("Halting trading to prevent ghost orders and order timeouts.")
+            print("-" * 40 + "\n")
+
             self.current_equity = self.initial_capital
             return
 
-        self.initial_capital = float(portfolio_equity)
-        self.current_equity = float(portfolio_equity)
-        print(f"Initialized startup equity from portfolio: {self.current_equity:,.0f} VND")
+        data = self._to_dict(payload)
+        if not data and isinstance(payload, dict):
+            data = payload
+
+        equity_value: Optional[float] = None
+        for src in (data, data.get("data", {})):
+            if not isinstance(src, dict):
+                continue
+            for key in (
+                "totalBalance",
+                "equity",
+                "current_equity",
+                "net_asset_value",
+                "total_equity",
+            ):
+                if key in src and src[key] is not None:
+                    try:
+                        equity_value = float(src[key])
+                        break
+                    except (TypeError, ValueError):
+                        continue
+            if equity_value is not None:
+                break
+
+        if equity_value is None:
+            print("WARNING: Could not parse equity from REST response.")
+            print(
+                "Using configured initial capital: "
+                f"{self.initial_capital:,.0f} VND"
+            )
+            self.current_equity = self.initial_capital
+            print("-" * 40 + "\n")
+            return
+
+        self.initial_capital = equity_value
+        self.current_equity = equity_value
+        print(f"Startup Equity:            {self.current_equity:,.0f} VND")
+        print("-" * 40 + "\n")
 
     def _pull_equity_from_portfolio(self) -> Optional[float]:
         try:
-            payload = self.client.get_portfolio_by_sub(sub_account_id=self.sub_account)
+            sub_scope = (
+                self.client.use_sub_account(self.sub_account)
+                if hasattr(self.client, "use_sub_account")
+                else nullcontext()
+            )
+            with sub_scope:
+                payload = self.client.get_account_balance()
+            if isinstance(payload, dict) and payload.get("success") is False:
+                return None
         except Exception:
             return None
 
@@ -842,7 +928,13 @@ class LiveTradingEngine:
         if not data and isinstance(payload, dict):
             data = payload
 
-        for key in ("current_equity", "equity", "net_asset_value", "total_equity"):
+        for key in (
+            "totalBalance",
+            "equity",
+            "current_equity",
+            "net_asset_value",
+            "total_equity",
+        ):
             if key in data and data[key] is not None:
                 try:
                     return float(data[key])
@@ -851,7 +943,13 @@ class LiveTradingEngine:
 
         if isinstance(data.get("data"), dict):
             nested = data["data"]
-            for key in ("current_equity", "equity", "net_asset_value", "total_equity"):
+            for key in (
+                "totalBalance",
+                "equity",
+                "current_equity",
+                "net_asset_value",
+                "total_equity",
+            ):
                 if key in nested and nested[key] is not None:
                     try:
                         return float(nested[key])
