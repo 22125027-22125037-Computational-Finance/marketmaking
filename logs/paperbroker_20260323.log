@@ -1208,3 +1208,21 @@ requests.exceptions.HTTPError: 502 Server Error: Bad Gateway for url: https://pa
 [2026-03-23 15:17:19] [DEBUG] POST https://papertrade.algotrade.vn/accounting/api/fix-account-info/get-fix-id succeeded status_code=200
 [2026-03-23 15:17:19] [INFO] event=fix_id_resolved username=Group08 fixAccountID=d8c8d8b3351147869bda099d2d7598eb
 [2026-03-23 15:17:30] [INFO] Stopping FIX session...
+[2026-03-23 15:39:02] [INFO] Session created: FIX.4.4:9629235d865343419b0dc388bbb34960->SERVER
+[2026-03-23 15:39:02] [DEBUG] FIXSessionManager initialized config=C:\Users\khiem\AppData\Local\Temp\paperbroker_3tqr6lnm.cfg username=Group08
+[2026-03-23 15:39:02] [DEBUG] RestSession initialized with base_url: https://papertrade.algotrade.vn/accounting
+[2026-03-23 15:39:02] [INFO] Initialized KafkaMarketDataClient: 52.77.119.94:9092, merge_updates=True
+[2026-03-23 15:39:02] [DEBUG] Registered handler for event 'fix:logon'. Total handlers: 1
+[2026-03-23 15:39:02] [DEBUG] Registered handler for event 'fix:logout'. Total handlers: 2
+[2026-03-23 15:39:02] [DEBUG] Registered handler for event 'fix:order:filled'. Total handlers: 3
+[2026-03-23 15:39:02] [DEBUG] Registered handler for event 'fix:order:partial_fill'. Total handlers: 4
+[2026-03-23 15:39:02] [DEBUG] Registered handler for event 'fix:order:canceled'. Total handlers: 5
+[2026-03-23 15:39:02] [DEBUG] Registered handler for event 'fix:order:rejected'. Total handlers: 6
+[2026-03-23 15:39:02] [INFO] Starting FIX session...
+[2026-03-23 15:39:02] [DEBUG] POST https://papertrade.algotrade.vn/accounting/api/fix-account-info/get-fix-id payload_keys=['username', 'password']
+[2026-03-23 15:39:03] [DEBUG] [TO ADMIN] 8=FIX.4.4|9=116|35=A|34=1|49=9629235d865343419b0dc388bbb34960|52=20260323-08:39:03.000|56=SERVER|1=D1|98=0|108=30|141=Y|553=Group08|10=058|
+[2026-03-23 15:39:03] [INFO] Logged out: FIX.4.4:9629235d865343419b0dc388bbb34960->SERVER
+[2026-03-23 15:39:03] [DEBUG] Emitting event 'fix:logout' to 1 handler(s)
+[2026-03-23 15:39:03] [DEBUG] POST https://papertrade.algotrade.vn/accounting/api/fix-account-info/get-fix-id succeeded status_code=200
+[2026-03-23 15:39:03] [INFO] event=fix_id_resolved username=Group08 fixAccountID=d8c8d8b3351147869bda099d2d7598eb
+[2026-03-23 15:39:14] [INFO] Stopping FIX session...

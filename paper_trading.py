@@ -58,6 +58,7 @@ class ActiveOrder:
     side: str
     price: float
     qty: int
+    timestamp: float = 0.0
 
 
 class LiveTradingEngine:
@@ -143,6 +144,29 @@ class LiveTradingEngine:
             "SELL": {"failures": 0.0, "next_retry_ts": 0.0},
         }
 
+        self.requote_min_interval_seconds = float(
+            os.getenv("PAPERBROKER_REQUOTE_MIN_INTERVAL_SECONDS", "1.0")
+        )
+        self.order_modify_cooldown_seconds = float(
+            os.getenv("PAPERBROKER_ORDER_MODIFY_COOLDOWN_SECONDS", "5.0")
+        )
+        self.cancel_retry_backoff_seconds = float(
+            os.getenv("PAPERBROKER_CANCEL_RETRY_BACKOFF_SECONDS", "5.0")
+        )
+        self._last_requote_ts: Dict[str, float] = {"BUY": 0.0, "SELL": 0.0}
+        self._cancel_retry_block_until: Dict[str, float] = {"BUY": 0.0, "SELL": 0.0}
+
+        self.startup_recovery_enabled = (
+            os.getenv("PAPERBROKER_STARTUP_RECOVERY_ENABLED", "1").strip().lower()
+            not in {"0", "false", "no"}
+        )
+        self.startup_recovery_max_cancel_orders = int(
+            os.getenv("PAPERBROKER_STARTUP_RECOVERY_MAX_CANCEL_ORDERS", "6")
+        )
+        self.startup_recovery_cancel_timeout_seconds = float(
+            os.getenv("PAPERBROKER_STARTUP_RECOVERY_CANCEL_TIMEOUT_SECONDS", "0.5")
+        )
+
         self.client = self._build_fix_client()
         self.market_data_client = self._build_kafka_client()
 
@@ -182,17 +206,24 @@ class LiveTradingEngine:
         return {}
 
     def _build_fix_client(self) -> Any:
-        # Forcing isolation test by entirely removing the .env lookups
-        print("Bypassing .env - Forcing hardcoded credentials...")
+        project_dir = os.path.dirname(os.path.abspath(__file__))
+        log_dir = os.path.join(project_dir, "logs")
+        os.makedirs(os.path.join(log_dir, "client_fix_messages"), exist_ok=True)
+
         kwargs = {
-            "username": "Group08",
-            "password": "FKaAWHT3Xir8",
-            "default_sub_account": "D1",
-            "socket_connect_host": "papertrade.algotrade.vn",
-            "socket_connect_port": 5001,
-            "sender_comp_id": "9629235d865343419b0dc388bbb34960",
-            "target_comp_id": "SERVER",
-            "rest_base_url": "https://papertrade.algotrade.vn/accounting",
+            "username": self.username,
+            "password": self.password,
+            "default_sub_account": self.sub_account,
+            "socket_connect_host": self.socket_connect_host,
+            "socket_connect_port": self.socket_connect_port,
+            "sender_comp_id": self.sender_comp_id,
+            "target_comp_id": self._get_env_any("PAPERBROKER_TARGET_COMP_ID", "TARGET_COMP_ID")
+            or "SERVER",
+            "rest_base_url": self._get_env_any(
+                "PAPERBROKER_REST_BASE_URL", "PAPER_REST_BASE_URL"
+            )
+            or "https://papertrade.algotrade.vn/accounting",
+            "log_dir": log_dir,
         }
         return PaperBrokerClient(**kwargs)
 
@@ -204,10 +235,10 @@ class LiveTradingEngine:
         }
         kafka_username = os.getenv("PAPERBROKER_KAFKA_USERNAME")
         kafka_password = os.getenv("PAPERBROKER_KAFKA_PASSWORD")
-        if kafka_username:
-            kwargs["username"] = kafka_username
-        if kafka_password:
-            kwargs["password"] = kafka_password
+        if kafka_username and kafka_username.strip().lower() != "username":
+            kwargs["username"] = kafka_username.strip()
+        if kafka_password and kafka_password.strip().lower() != "password":
+            kwargs["password"] = kafka_password.strip()
         return KafkaMarketDataClient(**kwargs)
 
     def _register_fix_events(self) -> None:
@@ -419,6 +450,16 @@ class LiveTradingEngine:
                 max_inventory=self.max_inventory,
             )
 
+            # Prevent crossed/washable quotes when spread collapses below one tick.
+            if (
+                self.last_price is not None
+                and bid_price is not None
+                and ask_price is not None
+                and self._normalize_price(bid_price) >= self._normalize_price(ask_price)
+            ):
+                bid_price = self.last_price - self.tick_size
+                ask_price = self.last_price + self.tick_size
+
             self._replace_order_if_needed("BUY", bid_price)
             self._replace_order_if_needed("SELL", ask_price)
 
@@ -546,12 +587,26 @@ class LiveTradingEngine:
         if self.trading_halted:
             return
 
+        now = time.time()
         existing = self.active_orders.get(side)
+
+        if now < self._cancel_retry_block_until.get(side, 0.0):
+            return
+
+        if (
+            existing is not None
+            and self.requote_min_interval_seconds > 0
+            and now - self._last_requote_ts.get(side, 0.0) < self.requote_min_interval_seconds
+        ):
+            return
 
         if target_price is None:
             if existing is not None:
-                self._cancel_order(existing.cl_ord_id)
-                self.active_orders[side] = None
+                canceled = self._cancel_order(existing.cl_ord_id)
+                if canceled:
+                    self.active_orders[side] = None
+                else:
+                    self._cancel_retry_block_until[side] = now + self.cancel_retry_backoff_seconds
             return
 
         if side == "BUY" and self.inventory >= self.max_inventory:
@@ -595,8 +650,18 @@ class LiveTradingEngine:
         if existing is not None and abs(existing.price - normalized_price) < (self.tick_size / 2):
             return
 
+        if (
+            existing is not None
+            and self.order_modify_cooldown_seconds > 0
+            and now - getattr(existing, "timestamp", 0.0) < self.order_modify_cooldown_seconds
+        ):
+            return
+
         if existing is not None:
-            self._cancel_order(existing.cl_ord_id)
+            canceled = self._cancel_order(existing.cl_ord_id)
+            if not canceled:
+                self._cancel_retry_block_until[side] = now + self.cancel_retry_backoff_seconds
+                return
 
         cl_ord_id = self._place_limit_order(
             side=side,
@@ -610,15 +675,25 @@ class LiveTradingEngine:
                 side=side,
                 price=normalized_price,
                 qty=self.order_qty,
+                timestamp=now,
             )
+            self._last_requote_ts[side] = now
 
-    def _cancel_order(self, cl_ord_id: str) -> None:
+    def _cancel_order(self, cl_ord_id: str) -> bool:
+        def _execute_cancel() -> None:
+            try:
+                self.client.cancel_order(cl_ord_id=cl_ord_id)
+            except TypeError:
+                self.client.cancel_order(cl_ord_id)
+            except Exception as exc:  # pragma: no cover - runtime broker error
+                print(f"Cancel order failed internally for {cl_ord_id}: {exc}")
+
         try:
-            self.client.cancel_order(cl_ord_id=cl_ord_id)
-        except TypeError:
-            self.client.cancel_order(cl_ord_id)
-        except Exception as exc:  # pragma: no cover - runtime broker error
-            print(f"Cancel order failed for {cl_ord_id}: {exc}")
+            threading.Thread(target=_execute_cancel, daemon=True).start()
+            return True
+        except Exception as exc:
+            print(f"Failed to spawn cancel thread for {cl_ord_id}: {exc}")
+            return False
 
     def _place_limit_order(self, side: str, qty: int, price: float) -> str:
         try:
@@ -897,6 +972,10 @@ class LiveTradingEngine:
         state["next_retry_ts"] = 0.0
 
     async def _recover_pending_orders_startup(self) -> None:
+        if not self.startup_recovery_enabled:
+            print("Startup pending-order recovery disabled by environment.")
+            return
+
         recover_method = getattr(self.client, "recover_pending_orders", None)
         if recover_method is None:
             return
@@ -914,12 +993,47 @@ class LiveTradingEngine:
             print("No pending orders recovered from previous session.")
             return
 
+        if self.startup_recovery_max_cancel_orders > 0 and (
+            len(recovered_ids) > self.startup_recovery_max_cancel_orders
+        ):
+            print(
+                "Recovered "
+                f"{len(recovered_ids)} pending orders; limiting startup cancels to "
+                f"{self.startup_recovery_max_cancel_orders}."
+            )
+            recovered_ids = recovered_ids[: self.startup_recovery_max_cancel_orders]
+
         print(
             f"Recovered {len(recovered_ids)} pending orders from previous session. "
             "Canceling before live loops start..."
         )
+        timed_out_cancels = 0
         for cl_ord_id in recovered_ids:
+            canceled = await self._cancel_order_startup_with_timeout(cl_ord_id)
+            if not canceled:
+                timed_out_cancels += 1
+
+        if timed_out_cancels > 0:
+            print(
+                f"Startup recovery completed with {timed_out_cancels} cancel timeouts. "
+                "Continuing live startup without waiting for remaining cancel acknowledgments."
+            )
+
+    async def _cancel_order_startup_with_timeout(self, cl_ord_id: str) -> bool:
+        timeout = self.startup_recovery_cancel_timeout_seconds
+        if timeout <= 0:
             self._cancel_order(cl_ord_id)
+            return True
+
+        try:
+            # Run cancel in a worker thread so startup loop can move on when broker ack is slow.
+            await asyncio.wait_for(asyncio.to_thread(self._cancel_order, cl_ord_id), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            print(
+                f"Startup cancel timeout for {cl_ord_id} after {timeout:.2f}s; skipping."
+            )
+            return False
 
     @staticmethod
     def _extract_recovered_order_ids(payload: Any) -> List[str]:
