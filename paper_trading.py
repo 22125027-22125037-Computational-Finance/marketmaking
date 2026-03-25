@@ -298,6 +298,9 @@ class LiveTradingEngine:
             await self.stop_async()
             return
 
+        # Sync actual broker inventory to avoid startup desynchronization.
+        self._initialize_startup_position()
+
         await self._recover_pending_orders_startup()
 
         dashboard_task = asyncio.create_task(self.print_dashboard_loop(), name="dashboard-loop")
@@ -615,11 +618,8 @@ class LiveTradingEngine:
 
         if target_price is None:
             if existing is not None:
-                canceled = self._cancel_order(existing.cl_ord_id)
-                if canceled:
-                    self.active_orders[side] = None
-                else:
-                    self._cancel_retry_block_until[side] = now + self.cancel_retry_backoff_seconds
+                self._cancel_order(existing.cl_ord_id)
+                self._cancel_retry_block_until[side] = now + 2.0
             return
 
         if side == "BUY" and self.inventory >= self.max_inventory:
@@ -671,10 +671,9 @@ class LiveTradingEngine:
             return
 
         if existing is not None:
-            canceled = self._cancel_order(existing.cl_ord_id)
-            if not canceled:
-                self._cancel_retry_block_until[side] = now + self.cancel_retry_backoff_seconds
-                return
+            self._cancel_order(existing.cl_ord_id)
+            self._cancel_retry_block_until[side] = now + 2.0
+            return
 
         cl_ord_id = self._place_limit_order(
             side=side,
@@ -723,16 +722,25 @@ class LiveTradingEngine:
             return ""
 
     def _place_market_order(self, side: str, qty: int, tag: str = "") -> str:
-        if qty <= 0:
+        if qty <= 0 or self.last_price is None:
             return ""
+
+        # Exchange rejects OrdType=MARKET, so emulate with an aggressive LIMIT.
+        aggressiveness = self.tick_size * 10
+        aggressive_price = (
+            self.last_price + aggressiveness
+            if side.upper() == "BUY"
+            else self.last_price - aggressiveness
+        )
+        normalized_price = self._normalize_price(aggressive_price)
 
         try:
             cl_ord_id = self.client.place_order(
                 full_symbol=self.symbol,
                 side=side.upper(),
                 qty=qty,
-                price=0.0,
-                ord_type="MARKET",
+                price=normalized_price,
+                ord_type="LIMIT",
             )
             if cl_ord_id is not None:
                 cl_ord_id_str = str(cl_ord_id)
@@ -745,7 +753,7 @@ class LiveTradingEngine:
                 return cl_ord_id_str
             return ""
         except Exception as exc:
-            print(f"Failed to place market order: {exc}")
+            print(f"Failed to place marketable limit order: {exc}")
             return ""
 
     def _apply_fill(self, side: str, qty: int, price: float) -> None:
@@ -910,6 +918,142 @@ class LiveTradingEngine:
         print(f"Startup Equity:            {self.current_equity:,.0f} VND")
         print("-" * 40 + "\n")
 
+    def _initialize_startup_position(self) -> None:
+        """Fetch actual open positions from broker to prevent startup desync."""
+        print("-" * 40)
+        print("Position Synchronization Check")
+        print("-" * 40)
+
+        def _instrument_matches(target_symbol: str, candidate_symbol: Any) -> bool:
+            target = str(target_symbol or "").strip().upper()
+            candidate = str(candidate_symbol or "").strip().upper()
+            if not target or not candidate:
+                return False
+
+            # Handle broker prefixes like "HNXDS:VN30F2604".
+            target_core = target.split(":")[-1]
+            candidate_core = candidate.split(":")[-1]
+            return (
+                candidate == target
+                or candidate_core == target_core
+                or candidate_core.endswith(target_core)
+                or target_core.endswith(candidate_core)
+            )
+
+        try:
+            sub_scope = (
+                self.client.use_sub_account(self.sub_account)
+                if hasattr(self.client, "use_sub_account")
+                else nullcontext()
+            )
+            with sub_scope:
+                if hasattr(self.client, "get_portfolio_by_sub"):
+                    payload = self.client.get_portfolio_by_sub(self.sub_account)
+                elif hasattr(self.client, "get_positions"):
+                    payload = self.client.get_positions()
+                else:
+                    print(
+                        "WARNING: SDK missing position endpoints "
+                        "(get_portfolio_by_sub/get_positions). Defaulting to Flat 0."
+                    )
+                    self.inventory = 0
+                    self.avg_entry_price = None
+                    print("-" * 40 + "\n")
+                    return
+
+            if isinstance(payload, dict) and payload.get("success") is False:
+                raise ValueError(f"REST error: {payload.get('error')}")
+
+            data = self._to_dict(payload)
+            if not data and isinstance(payload, dict):
+                data = payload
+
+            positions: Any = []
+            if isinstance(data, dict):
+                if isinstance(data.get("items"), list):
+                    positions = data.get("items", [])
+                elif isinstance(data.get("holdings"), list):
+                    positions = data.get("holdings", [])
+                elif isinstance(data.get("data"), list):
+                    positions = data.get("data", [])
+                elif isinstance(data.get("data"), dict) and isinstance(data["data"].get("items"), list):
+                    positions = data["data"].get("items", [])
+                elif isinstance(data, list):
+                    positions = data
+            elif isinstance(data, list):
+                positions = data
+
+            found_position = False
+            if isinstance(positions, list):
+                for pos in positions:
+                    if not isinstance(pos, dict):
+                        continue
+
+                    symbol = (
+                        pos.get("symbol")
+                        or pos.get("full_symbol")
+                        or pos.get("instrument")
+                        or pos.get("ticker")
+                        or ""
+                    )
+                    if not _instrument_matches(self.symbol, symbol):
+                        continue
+
+                    try:
+                        volume = int(
+                            pos.get("quantity", pos.get("volume", pos.get("qty", 0))) or 0
+                        )
+                    except (TypeError, ValueError):
+                        volume = 0
+
+                    side = str(pos.get("side", "")).upper()
+                    if side in {"SELL", "SHORT", "S", "2"}:
+                        self.inventory = -abs(volume)
+                    elif side in {"BUY", "LONG", "B", "1"}:
+                        self.inventory = abs(volume)
+                    else:
+                        # Portfolio quantity is often signed already.
+                        self.inventory = volume
+
+                    avg_px_raw = pos.get(
+                        "avgPrice",
+                        pos.get("average_price", pos.get("avg_px", pos.get("entry_price", 0.0))),
+                    )
+                    try:
+                        avg_px = float(avg_px_raw or 0.0)
+                    except (TypeError, ValueError):
+                        avg_px = 0.0
+
+                    self.avg_entry_price = avg_px if avg_px > 0 else None
+                    found_position = True
+
+                    position_side = "Short" if self.inventory < 0 else "Long"
+                    print("REST Position Sync:      SUCCESS")
+                    print(
+                        f"Recovered Inventory:     {position_side} {abs(self.inventory)}"
+                    )
+                    entry_str = (
+                        f"{self.avg_entry_price:,.1f}"
+                        if self.avg_entry_price is not None
+                        else "N/A"
+                    )
+                    print(f"Recovered Entry Price:   {entry_str}")
+                    break
+
+            if not found_position:
+                print("REST Position Sync:      SUCCESS (No open positions found)")
+                self.inventory = 0
+                self.avg_entry_price = None
+
+        except Exception as exc:
+            print("REST Position Sync:      FAILED")
+            print(f"Error Details:           {exc}")
+            print("WARNING: Assuming Flat 0. Live PnL may be desynchronized if positions exist.")
+            self.inventory = 0
+            self.avg_entry_price = None
+
+        print("-" * 40 + "\n")
+
     def _pull_equity_from_portfolio(self) -> Optional[float]:
         try:
             sub_scope = (
@@ -990,12 +1134,19 @@ class LiveTradingEngine:
         self._flatten_inventory_market()
 
     def _cancel_all_resting_orders(self) -> None:
+        now = time.time()
         for side in ("BUY", "SELL"):
             order = self.active_orders.get(side)
             if order is None:
                 continue
+
+            # Prevent spamming cancel requests over the network.
+            if now < self._cancel_retry_block_until.get(side, 0.0):
+                continue
+
             self._cancel_order(order.cl_ord_id)
-            self.active_orders[side] = None
+            # Block duplicate cancel requests while waiting for exchange ack.
+            self._cancel_retry_block_until[side] = now + 2.0
 
     def _flatten_inventory_market(self) -> None:
         if self.inventory == 0:
