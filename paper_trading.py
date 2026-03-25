@@ -100,6 +100,7 @@ class LiveTradingEngine:
         self.initial_capital = 500_000_000.0
         self.current_equity = self.initial_capital
         self.kill_switch_equity = 400_000_000.0
+        self.stop_loss_points = float(os.getenv("PAPERBROKER_STOP_LOSS_POINTS", "10.0"))
         self.trading_halted = False
 
         self.fee_per_contract = 40_000.0  # 0.4 points * 100,000 multiplier
@@ -121,9 +122,12 @@ class LiveTradingEngine:
         self.min_points_for_signals = 60
 
         self.active_orders: Dict[str, Optional[ActiveOrder]] = {"BUY": None, "SELL": None}
-        # Track market orders because they are not represented in active limit quotes.
+        # Track in-flight non-quote orders (marketable and passive flatten orders).
         self.inflight_market_orders: Dict[str, Dict[str, Any]] = {}
         self._inflight_lock = threading.RLock()
+        # Hold fills that arrive before REST placement state catches up.
+        self.unresolved_fills: list[dict[str, Any]] = []
+        self._unresolved_fills_lock = threading.RLock()
 
         self.portfolio_refresh_seconds = float(
             os.getenv("PAPERBROKER_PORTFOLIO_REFRESH_SECONDS", "3")
@@ -144,6 +148,10 @@ class LiveTradingEngine:
             "BUY": {"failures": 0.0, "next_retry_ts": 0.0},
             "SELL": {"failures": 0.0, "next_retry_ts": 0.0},
         }
+        self.reversal_flatten_escalation_ticks: Dict[str, int] = {"BUY": 0, "SELL": 0}
+        self.reversal_flatten_timeout_seconds = float(
+            os.getenv("PAPERBROKER_REVERSAL_FLATTEN_TIMEOUT_SECONDS", "3")
+        )
 
         self.requote_min_interval_seconds = float(
             os.getenv("PAPERBROKER_REQUOTE_MIN_INTERVAL_SECONDS", "1.0")
@@ -306,9 +314,10 @@ class LiveTradingEngine:
         dashboard_task = asyncio.create_task(self.print_dashboard_loop(), name="dashboard-loop")
         kafka_task = asyncio.create_task(self._run_kafka_consumer(), name="kafka-consumer")
         trading_task = asyncio.create_task(self._trading_logic_loop(), name="trading-logic")
+        recon_task = asyncio.create_task(self._reconciliation_loop(), name="recon-loop")
 
         try:
-            await asyncio.gather(kafka_task, dashboard_task, trading_task)
+            await asyncio.gather(kafka_task, dashboard_task, trading_task, recon_task)
         finally:
             await self.stop_async()
 
@@ -354,6 +363,20 @@ class LiveTradingEngine:
                 self.active_orders[side] = None
                 print(f"Order canceled: side={side}, cl_ord_id={orig_cl_ord_id}")
 
+        with self._inflight_lock:
+            canceled_non_quote = self.inflight_market_orders.pop(orig_cl_ord_id, None)
+        if canceled_non_quote and str(canceled_non_quote.get("tag", "")) == "reversal_flatten":
+            canceled_side = str(canceled_non_quote.get("side", "")).upper()
+            if canceled_non_quote.get("escalate_after_cancel") and canceled_side in {"BUY", "SELL"}:
+                self.reversal_flatten_escalation_ticks[canceled_side] = min(
+                    self.reversal_flatten_escalation_ticks.get(canceled_side, 0) + 1,
+                    10,
+                )
+                print(
+                    f"Reversal flatten for {canceled_side} timed out; "
+                    f"escalating to {self.reversal_flatten_escalation_ticks[canceled_side]} tick(s)."
+                )
+
     def on_order_rejected(self, cl_ord_id: str, reason: str, status: str, **kwargs) -> None:
         _ = (status, kwargs)
         print(f"Order rejected: cl_ord_id={cl_ord_id}, reason={reason}")
@@ -392,10 +415,24 @@ class LiveTradingEngine:
                 side = str(market_order.get("side", "")).upper()
 
         if not side:
-            print(f"Ignored fill for untracked order: {cl_ord_id}")
+            print(f"Fill arrived early for {cl_ord_id}. Queuing to pending fills.")
+            with self._unresolved_fills_lock:
+                self.unresolved_fills.append(
+                    {
+                        "cl_ord_id": cl_ord_id,
+                        "status": status,
+                        "last_px": last_px,
+                        "last_qty": last_qty,
+                    }
+                )
             return
 
         fill_qty = int(last_qty)
+        with self._inflight_lock:
+            tracked = self.inflight_market_orders.get(cl_ord_id)
+            if tracked is not None:
+                tracked["filled_qty"] = int(tracked.get("filled_qty", 0)) + fill_qty
+
         self._apply_fill(side=side, qty=fill_qty, price=last_px)
         self.total_trades_executed += fill_qty
 
@@ -432,6 +469,58 @@ class LiveTradingEngine:
 
         while not self.trading_halted:
             await asyncio.sleep(0.1)
+            self._manage_reversal_flatten_timeouts()
+
+            with self._unresolved_fills_lock:
+                unresolved_snapshot = list(self.unresolved_fills)
+
+            resolved_fill_tokens: set[int] = set()
+            for fill in unresolved_snapshot:
+                cl_ord_id = str(fill.get("cl_ord_id", ""))
+                side = None
+                if self.active_orders.get("BUY") and self.active_orders["BUY"].cl_ord_id == cl_ord_id:
+                    side = "BUY"
+                elif self.active_orders.get("SELL") and self.active_orders["SELL"].cl_ord_id == cl_ord_id:
+                    side = "SELL"
+                else:
+                    with self._inflight_lock:
+                        market_order = self.inflight_market_orders.get(cl_ord_id)
+                    if market_order:
+                        side = str(market_order.get("side", "")).upper()
+
+                if not side:
+                    continue
+
+                print(f"Resolving delayed fill for {cl_ord_id} on side {side}")
+                fill_qty = int(fill.get("last_qty", 0))
+                fill_px = float(fill.get("last_px", 0.0))
+                fill_status = str(fill.get("status", ""))
+
+                self._apply_fill(side=side, qty=fill_qty, price=fill_px)
+                self.total_trades_executed += fill_qty
+
+                if fill_status == "FILLED":
+                    if self.active_orders.get(side) and self.active_orders[side].cl_ord_id == cl_ord_id:
+                        self.active_orders[side] = None
+                    with self._inflight_lock:
+                        completed = self.inflight_market_orders.pop(cl_ord_id, None)
+                    if completed and str(completed.get("tag", "")) == "reversal_flatten":
+                        completed_side = str(completed.get("side", "")).upper()
+                        if completed_side in {"BUY", "SELL"}:
+                            self._reset_reversal_flatten_state(completed_side)
+
+                resolved_fill_tokens.add(id(fill))
+
+            if resolved_fill_tokens:
+                with self._unresolved_fills_lock:
+                    self.unresolved_fills = [
+                        fill
+                        for fill in self.unresolved_fills
+                        if id(fill) not in resolved_fill_tokens
+                    ]
+                self._refresh_equity(force_pull=False)
+                self._evaluate_kill_switch()
+                self._evaluate_stop_loss()
 
             if self.last_price is None or self.last_price == last_processed_price:
                 continue
@@ -440,6 +529,7 @@ class LiveTradingEngine:
 
             self._refresh_equity(force_pull=False)
             self._evaluate_kill_switch()
+            self._evaluate_stop_loss()
 
             if self.trading_halted:
                 break
@@ -454,13 +544,19 @@ class LiveTradingEngine:
             self.latest_indicators["rsi"] = indicators["rsi"]
             self.latest_indicators["adx"] = indicators["adx"]
             self.latest_indicators["atr"] = indicators["atr"]
-            self.latest_indicators["dynamic_spread"] = indicators["atr"] * self.spread_multiplier
+            min_profitable_spread = 0.5
+            floored_dynamic_spread = max(
+                indicators["atr"] * self.spread_multiplier,
+                min_profitable_spread,
+            )
+            self.latest_indicators["dynamic_spread"] = floored_dynamic_spread
 
             bid_price, ask_price = self.market_maker.calculate_quotes(
                 mid_price=self.last_price,
                 current_inventory=self.inventory,
                 rsi=indicators["rsi"],
                 atr=indicators["atr"],
+                dynamic_spread=floored_dynamic_spread,
                 trend_signal=indicators["trend_signal"],
                 adx=indicators["adx"],
                 max_inventory=self.max_inventory,
@@ -478,6 +574,31 @@ class LiveTradingEngine:
 
             self._replace_order_if_needed("BUY", bid_price)
             self._replace_order_if_needed("SELL", ask_price)
+
+    async def _reconciliation_loop(self) -> None:
+        """Periodic state reconciliation via REST to fix FIX drop-copy drift."""
+        while not self.trading_halted:
+            await asyncio.sleep(600)
+
+            if self.trading_halted:
+                break
+
+            print("\n" + "-" * 40)
+            print("10-Minute REST State Reconciliation")
+            print("-" * 40)
+
+            self._initialize_startup_position()
+
+            true_equity = self._pull_equity_from_portfolio()
+            if true_equity is not None:
+                # Keep local realized/unrealized decomposition coherent after equity resync.
+                current_unrealized = self._compute_internal_equity() - self.initial_capital - self.realized_pnl
+                self.initial_capital = true_equity - self.realized_pnl - current_unrealized
+                self.current_equity = self._compute_internal_equity()
+                print(f"Reconciled Equity:       {self.current_equity:,.0f} VND")
+            else:
+                print("Reconciled Equity:       FAILED TO PULL")
+            print("-" * 40 + "\n")
 
     async def print_dashboard_loop(self) -> None:
         """Print live status block every 10 seconds until trading is halted."""
@@ -616,17 +737,20 @@ class LiveTradingEngine:
         ):
             return
 
+        # 1. PULL QUOTES (If target_price is None, we just want to cancel)
         if target_price is None:
             if existing is not None:
                 self._cancel_order(existing.cl_ord_id)
                 self._cancel_retry_block_until[side] = now + 2.0
             return
 
+        # 2. INVENTORY CAPS
         if side == "BUY" and self.inventory >= self.max_inventory:
             return
         if side == "SELL" and self.inventory <= -self.max_inventory:
             return
 
+        # 3. REVERSAL LOGIC (Flatten Before Flip)
         if self._requires_flatten_before_reversal(side):
             if self._has_pending_reversal_flatten(side):
                 return
@@ -637,7 +761,10 @@ class LiveTradingEngine:
                     print(retry_reason)
                 return
 
-            self._cancel_all_resting_orders()
+            # Wait for any active limits to be cleanly canceled by the exchange.
+            if self.active_orders.get("BUY") is not None or self.active_orders.get("SELL") is not None:
+                self._cancel_all_resting_orders()
+                return
 
             flatten_qty = abs(self.inventory)
             if flatten_qty > 0:
@@ -645,7 +772,7 @@ class LiveTradingEngine:
                 print(
                     f"Flattening {flatten_qty} {current_side} contracts before opening {side}."
                 )
-                cl_ord_id = self._place_market_order(
+                cl_ord_id = self._place_passive_flatten_order(
                     side=side,
                     qty=flatten_qty,
                     tag="reversal_flatten",
@@ -653,15 +780,36 @@ class LiveTradingEngine:
                 if not cl_ord_id:
                     self._mark_reversal_flatten_failure(
                         side,
-                        "Market flatten placement failed",
+                        "Passive flatten placement failed",
                     )
-            # Enforce two-step flip rule: flatten first, open new side only after fills update inventory.
             return
+
+        # --- THE FRIENDLY FIRE FIX ---
+        # If the engine is currently in the middle of a reversal flatten (because the OTHER side
+        # fired a market order and is waiting for a fill), DO NOT place new limit orders on this side.
+        with self._inflight_lock:
+            is_flattening = any(
+                str(order.get("tag", "")) == "reversal_flatten"
+                for order in self.inflight_market_orders.values()
+            )
+        if is_flattening:
+            if existing is not None:
+                self._cancel_order(existing.cl_ord_id)
+                self._cancel_retry_block_until[side] = now + 2.0
+            return
+        # -----------------------------
 
         normalized_price = self._normalize_price(target_price)
 
-        if existing is not None and abs(existing.price - normalized_price) < (self.tick_size / 2):
-            return
+        # 4. PRICE ADJUSTMENT (Protect queue priority from micro-requoting)
+        if existing is not None:
+            order_age_seconds = max(0.0, now - float(getattr(existing, "timestamp", 0.0)))
+            requote_threshold = self.tick_size * 2
+            if order_age_seconds > 10:
+                requote_threshold = self.tick_size / 2
+
+            if abs(existing.price - normalized_price) < requote_threshold:
+                return
 
         if (
             existing is not None
@@ -670,11 +818,14 @@ class LiveTradingEngine:
         ):
             return
 
+        # 5. RACE CONDITION FIX
+        # If we have an existing order, cancel and wait for exchange confirmation.
         if existing is not None:
             self._cancel_order(existing.cl_ord_id)
             self._cancel_retry_block_until[side] = now + 2.0
             return
 
+        # 6. SAFE TO PLACE (Only when no active local order is tracked)
         cl_ord_id = self._place_limit_order(
             side=side,
             qty=self.order_qty,
@@ -749,12 +900,93 @@ class LiveTradingEngine:
                         "side": side.upper(),
                         "qty": qty,
                         "tag": tag,
+                        "timestamp": time.time(),
+                        "price": normalized_price,
+                        "filled_qty": 0,
                     }
                 return cl_ord_id_str
             return ""
         except Exception as exc:
             print(f"Failed to place marketable limit order: {exc}")
             return ""
+
+    def _place_passive_flatten_order(self, side: str, qty: int, tag: str = "") -> str:
+        if qty <= 0 or self.last_price is None:
+            return ""
+
+        side_upper = side.upper()
+        aggressiveness_ticks = self.reversal_flatten_escalation_ticks.get(side_upper, 0)
+        passive_price = self.last_price
+        if aggressiveness_ticks > 0:
+            if side_upper == "BUY":
+                passive_price = self.last_price + (self.tick_size * aggressiveness_ticks)
+            else:
+                passive_price = self.last_price - (self.tick_size * aggressiveness_ticks)
+        normalized_price = self._normalize_price(passive_price)
+
+        try:
+            cl_ord_id = self.client.place_order(
+                full_symbol=self.symbol,
+                side=side_upper,
+                qty=qty,
+                price=normalized_price,
+                ord_type="LIMIT",
+            )
+            if cl_ord_id is not None:
+                cl_ord_id_str = str(cl_ord_id)
+                with self._inflight_lock:
+                    self.inflight_market_orders[cl_ord_id_str] = {
+                        "side": side_upper,
+                        "qty": qty,
+                        "tag": tag,
+                        "timestamp": time.time(),
+                        "price": normalized_price,
+                        "filled_qty": 0,
+                        "cancel_requested": False,
+                        "escalate_after_cancel": False,
+                    }
+                return cl_ord_id_str
+            return ""
+        except Exception as exc:
+            print(f"Failed to place passive flatten order: {exc}")
+            return ""
+
+    def _manage_reversal_flatten_timeouts(self) -> None:
+        now = time.time()
+        timed_out_ids: List[str] = []
+
+        with self._inflight_lock:
+            for cl_ord_id, order in self.inflight_market_orders.items():
+                if str(order.get("tag", "")) != "reversal_flatten":
+                    continue
+                if bool(order.get("cancel_requested", False)):
+                    continue
+                placed_at = float(order.get("timestamp", 0.0))
+                if placed_at <= 0:
+                    continue
+                if now - placed_at < self.reversal_flatten_timeout_seconds:
+                    continue
+
+                filled_qty = int(order.get("filled_qty", 0))
+                original_qty = int(order.get("qty", 0))
+                if original_qty > 0 and filled_qty >= original_qty:
+                    continue
+
+                timed_out_ids.append(cl_ord_id)
+
+            for cl_ord_id in timed_out_ids:
+                order = self.inflight_market_orders.get(cl_ord_id)
+                if order is None:
+                    continue
+                order["cancel_requested"] = True
+                order["escalate_after_cancel"] = True
+
+        for cl_ord_id in timed_out_ids:
+            print(
+                f"Reversal flatten order {cl_ord_id} stale > "
+                f"{self.reversal_flatten_timeout_seconds:.1f}s. Canceling for one-tick escalation."
+            )
+            self._cancel_order(cl_ord_id)
 
     def _apply_fill(self, side: str, qty: int, price: float) -> None:
         if qty <= 0:
@@ -1133,6 +1365,45 @@ class LiveTradingEngine:
         self._cancel_all_resting_orders()
         self._flatten_inventory_market()
 
+    def _evaluate_stop_loss(self) -> None:
+        if (
+            self.trading_halted
+            or self.inventory == 0
+            or self.avg_entry_price is None
+            or self.last_price is None
+        ):
+            return
+
+        with self._inflight_lock:
+            is_flushing = any(
+                str(order.get("tag", "")) == "reversal_flatten"
+                for order in self.inflight_market_orders.values()
+            )
+        if is_flushing:
+            return
+
+        points_against = 0.0
+        if self.inventory > 0:
+            points_against = self.avg_entry_price - self.last_price
+        elif self.inventory < 0:
+            points_against = self.last_price - self.avg_entry_price
+
+        if points_against < self.stop_loss_points:
+            return
+
+        print("\n" + "!" * 52)
+        print(f"STOP LOSS TRIGGERED: Position down {points_against:.1f} pts")
+        print(f"Flushing {abs(self.inventory)} contracts to prevent tail risk.")
+        print("!" * 52 + "\n")
+
+        self._cancel_all_resting_orders()
+        side_to_close = "SELL" if self.inventory > 0 else "BUY"
+        self._place_market_order(
+            side=side_to_close,
+            qty=abs(self.inventory),
+            tag="reversal_flatten",
+        )
+
     def _cancel_all_resting_orders(self) -> None:
         now = time.time()
         for side in ("BUY", "SELL"):
@@ -1219,6 +1490,7 @@ class LiveTradingEngine:
             return
         state["failures"] = 0.0
         state["next_retry_ts"] = 0.0
+        self.reversal_flatten_escalation_ticks[side] = 0
 
     async def _recover_pending_orders_startup(self) -> None:
         if not self.startup_recovery_enabled:

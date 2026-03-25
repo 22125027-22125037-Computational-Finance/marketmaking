@@ -38,22 +38,27 @@ class PredictiveRSIMarketMaker:
         atr: float,
         trend_signal: int,
         adx: float,
+        dynamic_spread: Optional[float] = None,
         max_inventory: int = 5,
     ) -> Tuple[Optional[float], Optional[float]]:
         """
         Calculate bid/ask with predictive RSI + trend + inventory filters.
         """
-        dynamic_spread = max(float(atr) * self.spread_multiplier, 0.0)
+        spread_value = (
+            max(float(dynamic_spread), 0.0)
+            if dynamic_spread is not None
+            else max(float(atr) * self.spread_multiplier, 0.0)
+        )
 
         if rsi < 30:
-            bid_price = float(midPrice) - (dynamic_spread * 0.5)
+            bid_price = float(midPrice) - (spread_value * 0.5)
             ask_price = None
         elif rsi > 70:
             bid_price = None
-            ask_price = float(midPrice) + (dynamic_spread * 0.5)
+            ask_price = float(midPrice) + (spread_value * 0.5)
         else:
-            bid_price = float(midPrice) - dynamic_spread
-            ask_price = float(midPrice) + dynamic_spread
+            bid_price = float(midPrice) - spread_value
+            ask_price = float(midPrice) + spread_value
 
         if currentInventory >= max_inventory:
             bid_price = None
@@ -77,6 +82,7 @@ class PredictiveRSIMarketMaker:
         atr: float,
         trend_signal: int,
         adx: float,
+        dynamic_spread: Optional[float] = None,
         max_inventory: int = 5,
     ) -> Tuple[Optional[float], Optional[float]]:
         """Snake-case alias for calculateQuotes."""
@@ -85,6 +91,7 @@ class PredictiveRSIMarketMaker:
             currentInventory=current_inventory,
             rsi=rsi,
             atr=atr,
+            dynamic_spread=dynamic_spread,
             trend_signal=trend_signal,
             adx=adx,
             max_inventory=max_inventory,

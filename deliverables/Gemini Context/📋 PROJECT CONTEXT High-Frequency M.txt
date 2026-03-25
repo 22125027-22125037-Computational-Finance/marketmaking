@@ -1,0 +1,57 @@
+📋 PROJECT CONTEXT: High-Frequency Market Making System (VN30F1M)
+1. Project Objective & Market
+
+Target Asset: Vietnamese Index Futures (VN30F1M). Currently trading the front-month contract (HNXDS:VN30F2604).
+
+Environment: PaperBroker Live Paper Trading (Step 7).
+
+Exchange Hours Constraint: System will trigger a FIX 35=5 Normal Logout outside of HOSE derivatives trading hours (08:45 - 11:30 and 13:00 - 14:45 GMT+7).
+2. Alpha Strategy: Predictive Regime-Aware Market Maker
+The engine uses a momentum-gated, predictive regime model instead of a pure Avellaneda-Stoikov framework to prevent toxic adverse selection.
+
+Asymmetric Quoting (RSI): Uses a 14-period Pandas rolling RSI. Oversold (< 30) restricts to Bid quotes only. Overbought (> 70) restricts to Ask quotes only.
+
+Regime Circuit Breaker (ADX/EMA): Uses a 14-period ADX and 12/26 EMA crossover. If $\text{ADX} > 25$ (indicating a strong directional trend), the engine physically blocks counter-trend liquidity provision to avoid being run over.
+Volatility-Adaptive Spreads: Static spreads are replaced with an ATR-driven formula:
+
+$$\text{dynamic\_spread} = \max(\text{ATR}_{14} \times 0.5, 0)$$
+
+3. Strict Risk Management
+
+Inventory Cap: Hard limit of $\pm 5$ contracts.
+
+Stop-Loss Flush: Intraday adverse excursion limit of 10.0 index points instantly market-orders out of the toxic position.
+
+Exchange Fees: The engine mathematically deducts 40,000 VND (0.4 index points) per contract upon every fill to track true realized PnL.
+
+Global Kill Switch: Starts with 500,000,000 VND equity. If equity drops below 400,000,000 VND, the system cancels all resting limit orders, flattens inventory via market orders, and sets self.trading_halted = True.
+4. Software Engineering & Execution Architecture
+
+Environment: Python 3.9 (Strictly constrained to Python 3.9 to utilize a precompiled quickfix-1.15.1-cp39 wheel, bypassing MSVC C++ compilation failures on Windows).
+
+SDK: paperbroker_client v0.2.4.
+Connectivity (Microservices):
+
+Market Data: KafkaMarketDataClient connecting to 52.77.119.94:9092.
+
+Execution: FIX 4.4 engine via PaperBrokerClient TCP socket at papertrade.algotrade.vn:5001.
+
+Accounting: REST API via https://papertrade.algotrade.vn/accounting.
+Concurrency Model (Decoupled Async):
+To prevent tick lag, the Kafka consumer's on_quote callback ONLY appends the latest_matched_price to a bounded collections.deque(maxlen=100).
+A separate _trading_logic_loop task runs asynchronously every 0.1 seconds to compute Pandas indicators and generate/replace limits.
+A print_dashboard_loop runs every 10 seconds.
+5. Execution Rules & Logic Hardening
+Sub-Account Mapping: The critical 404 REST API routing errors were resolved by mapping PAPER_ACCOUNT_ID_D1 to "main". The engine now successfully retrieves live account equity using client.get_account_balance().
+
+Flatten-Before-Flip Rule: Compliant with exchange rules. If the engine is holding Short and the RSI signals a Long entry, _replace_order_if_needed intercepts the request, cancels resting limits, and sends a market order to flatten the inventory to zero before allowing new opening limit orders.
+
+In-Flight Market Order Lock: To prevent the engine from spamming market flatten orders on every 0.1s tick while waiting for exchange fills, a strict threading.Lock protects an inflight_market_orders dictionary.
+
+Crash Recovery (SQLite): Leverages SDK v0.2.4 persistence. On startup, client.recover_pending_orders() executes immediately after logon to hunt down and cancel orphaned limit orders from previous crashes. Currently bypassed via PAPERBROKER_STARTUP_RECOVERY_ENABLED=0 for clean testing.
+6. Current Status
+Verified Operation: Both the test_paper_trading.py sandbox and the LiveTradingEngine in paper_trading.py have achieved flawless boot sequences.
+
+System Readiness: The FIX session maps successfully, the REST API returns the 500,000,000 VND starting capital cleanly, and Kafka hooks correctly into HNXDS:VN30F2604.
+
+Next Action: The engine is fully hardened against race conditions and is waiting for the 08:45 AM HOSE market open to begin receiving ticks and quoting live.
