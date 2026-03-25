@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import nullcontext
+from datetime import datetime, time as dt_time
 import inspect
 import os
 import threading
@@ -36,6 +37,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Deque, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -315,9 +317,10 @@ class LiveTradingEngine:
         kafka_task = asyncio.create_task(self._run_kafka_consumer(), name="kafka-consumer")
         trading_task = asyncio.create_task(self._trading_logic_loop(), name="trading-logic")
         recon_task = asyncio.create_task(self._reconciliation_loop(), name="recon-loop")
+        eod_task = asyncio.create_task(self._eod_liquidation_loop(), name="eod-loop")
 
         try:
-            await asyncio.gather(kafka_task, dashboard_task, trading_task, recon_task)
+            await asyncio.gather(kafka_task, dashboard_task, trading_task, recon_task, eod_task)
         finally:
             await self.stop_async()
 
@@ -599,6 +602,30 @@ class LiveTradingEngine:
             else:
                 print("Reconciled Equity:       FAILED TO PULL")
             print("-" * 40 + "\n")
+
+    async def _eod_liquidation_loop(self) -> None:
+        """Hard-stop risk control: flatten all inventory before 14:30 (GMT+7)."""
+        liquidation_start = dt_time(hour=14, minute=29, second=30)
+        liquidation_end = dt_time(hour=14, minute=30, second=0)
+        vn_tz = ZoneInfo("Asia/Ho_Chi_Minh")
+
+        while True:
+            await asyncio.sleep(1)
+
+            if self.trading_halted:
+                break
+
+            now_local = datetime.now(vn_tz).time()
+            if liquidation_start <= now_local < liquidation_end:
+                print("\n" + "#" * 90)
+                print("CRITICAL EOD LIQUIDATION TRIGGERED (14:29:30-14:30:00 GMT+7)")
+                print("Force-halting trading, canceling all resting orders, flattening inventory now.")
+                print("#" * 90 + "\n")
+
+                self.trading_halted = True
+                self._cancel_all_resting_orders()
+                self._flatten_inventory_market()
+                break
 
     async def print_dashboard_loop(self) -> None:
         """Print live status block every 10 seconds until trading is halted."""

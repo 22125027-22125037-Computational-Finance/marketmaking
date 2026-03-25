@@ -1938,3 +1938,41 @@ requests.exceptions.HTTPError: 404 Client Error:  for url: https://papertrade.al
 [2026-03-24 15:34:12] [DEBUG] [FROM ADMIN] 8=FIX.4.4|9=81|35=5|34=2|49=SERVER|52=20260324-08:34:14.245|56=9629235d865343419b0dc388bbb34960|10=143|
 [2026-03-24 15:34:12] [INFO] Logged out: FIX.4.4:9629235d865343419b0dc388bbb34960->SERVER
 [2026-03-24 15:34:12] [DEBUG] Emitting event 'fix:logout' to 1 handler(s)
+[2026-03-24 15:47:44] [INFO] Session created: FIX.4.4:9629235d865343419b0dc388bbb34960->SERVER
+[2026-03-24 15:47:44] [DEBUG] FIXSessionManager initialized config=C:\Users\khiem\AppData\Local\Temp\paperbroker_d0ad01ng.cfg username=Group08
+[2026-03-24 15:47:44] [DEBUG] RestSession initialized with base_url: https://papertrade.algotrade.vn/accounting
+[2026-03-24 15:47:44] [INFO] Initialized KafkaMarketDataClient: 52.77.119.94:9092, merge_updates=True
+[2026-03-24 15:47:44] [DEBUG] Registered handler for event 'fix:logon'. Total handlers: 1
+[2026-03-24 15:47:44] [DEBUG] Registered handler for event 'fix:logout'. Total handlers: 2
+[2026-03-24 15:47:44] [DEBUG] Registered handler for event 'fix:order:filled'. Total handlers: 3
+[2026-03-24 15:47:44] [DEBUG] Registered handler for event 'fix:order:partial_fill'. Total handlers: 4
+[2026-03-24 15:47:44] [DEBUG] Registered handler for event 'fix:order:canceled'. Total handlers: 5
+[2026-03-24 15:47:44] [DEBUG] Registered handler for event 'fix:order:rejected'. Total handlers: 6
+[2026-03-24 15:47:44] [INFO] Starting FIX session...
+[2026-03-24 15:47:44] [DEBUG] POST https://papertrade.algotrade.vn/accounting/api/fix-account-info/get-fix-id payload_keys=['username', 'password']
+[2026-03-24 15:47:44] [DEBUG] [TO ADMIN] 8=FIX.4.4|9=135|35=A|34=1|49=9629235d865343419b0dc388bbb34960|52=20260324-08:47:44.000|56=SERVER|1=main|98=0|108=30|141=Y|553=Group08|554=FKaAWHT3Xir8|10=016|
+[2026-03-24 15:47:45] [DEBUG] POST https://papertrade.algotrade.vn/accounting/api/fix-account-info/get-fix-id succeeded status_code=200
+[2026-03-24 15:47:45] [DEBUG] [FROM ADMIN] 8=FIX.4.4|9=99|35=A|34=1|49=SERVER|52=20260324-08:47:47.248|56=9629235d865343419b0dc388bbb34960|98=0|108=30|141=Y|10=246|
+[2026-03-24 15:47:45] [INFO] event=fix_id_resolved username=Group08 fixAccountID=d8c8d8b3351147869bda099d2d7598eb
+[2026-03-24 15:47:45] [INFO] Logon success: FIX.4.4:9629235d865343419b0dc388bbb34960->SERVER
+[2026-03-24 15:47:45] [INFO] Order manager session set: FIX.4.4:9629235d865343419b0dc388bbb34960->SERVER
+[2026-03-24 15:47:45] [DEBUG] Emitting event 'fix:logon' to 1 handler(s)
+[2026-03-24 15:47:45] [DEBUG] Entering sub-account context: main -> main
+[2026-03-24 15:47:45] [DEBUG] POST https://papertrade.algotrade.vn/accounting/api/account-info-by-sub/total-balance payload_keys=['fixAccountID', 'subAccountID']
+[2026-03-24 15:47:45] [DEBUG] POST https://papertrade.algotrade.vn/accounting/api/account-info-by-sub/total-balance succeeded status_code=200
+[2026-03-24 15:47:45] [INFO] event=total_balance_resolved fixAccountID=d8c8d8b3351147869bda099d2d7598eb subAccountID=main totalBalance=500000000
+[2026-03-24 15:47:45] [DEBUG] Exiting sub-account context: main -> main
+[2026-03-24 15:47:45] [INFO] Subscribed to HNXDS:VN30F2604 (topic: real.HNXDS.VN30F2604)
+[2026-03-24 15:47:45] [INFO] Starting Kafka consumer for topics: ['real.HNXDS.VN30F2604']
+[2026-03-24 15:47:46] [INFO] Kafka consumer thread started
+[2026-03-24 15:47:46] [INFO] Kafka consumer started
+[2026-03-24 15:48:14] [DEBUG] [TO ADMIN] 8=FIX.4.4|9=100|35=0|34=2|49=9629235d865343419b0dc388bbb34960|52=20260324-08:48:14.000|56=SERVER|1=main|553=Group08|10=016|
+[2026-03-24 15:48:16] [DEBUG] [FROM ADMIN] 8=FIX.4.4|9=81|35=0|34=2|49=SERVER|52=20260324-08:48:18.039|56=9629235d865343419b0dc388bbb34960|10=148|
+[2026-03-24 15:48:26] [INFO] Stopping Kafka consumer...
+[2026-03-24 15:48:27] [INFO] Kafka consumer thread stopped
+[2026-03-24 15:48:27] [INFO] Kafka consumer stopped
+[2026-03-24 15:48:27] [INFO] Stopping FIX session...
+[2026-03-24 15:48:27] [DEBUG] [TO ADMIN] 8=FIX.4.4|9=100|35=5|34=3|49=9629235d865343419b0dc388bbb34960|52=20260324-08:48:27.000|56=SERVER|1=main|553=Group08|10=026|
+[2026-03-24 15:48:27] [DEBUG] [FROM ADMIN] 8=FIX.4.4|9=81|35=5|34=3|49=SERVER|52=20260324-08:48:29.698|56=9629235d865343419b0dc388bbb34960|10=167|
+[2026-03-24 15:48:27] [INFO] Logged out: FIX.4.4:9629235d865343419b0dc388bbb34960->SERVER
+[2026-03-24 15:48:27] [DEBUG] Emitting event 'fix:logout' to 1 handler(s)
