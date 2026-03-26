@@ -556,12 +556,50 @@ class LiveTradingEngine:
             self.latest_indicators["rsi"] = indicators["rsi"]
             self.latest_indicators["adx"] = indicators["adx"]
             self.latest_indicators["atr"] = indicators["atr"]
-            min_profitable_spread = 0.5
+            min_profitable_spread = 1.0
             floored_dynamic_spread = max(
                 indicators["atr"] * self.spread_multiplier,
                 min_profitable_spread,
             )
             self.latest_indicators["dynamic_spread"] = floored_dynamic_spread
+
+            # Signal-driven reversal flattening: only flush when RSI says regime flipped.
+            rsi_value = indicators["rsi"]
+            long_signal = rsi_value < 20
+            short_signal = rsi_value > 80
+
+            should_flatten_short = self.inventory < 0 and long_signal
+            should_flatten_long = self.inventory > 0 and short_signal
+
+            if should_flatten_short:
+                if self._has_pending_reversal_flatten("BUY"):
+                    continue
+
+                print(
+                    f"Signal reversal flush: covering short inventory due to RSI {rsi_value:.2f} < 20."
+                )
+                self._cancel_all_resting_orders()
+                self._place_market_order(
+                    side="BUY",
+                    qty=abs(self.inventory),
+                    tag="reversal_flatten",
+                )
+                continue
+
+            if should_flatten_long:
+                if self._has_pending_reversal_flatten("SELL"):
+                    continue
+
+                print(
+                    f"Signal reversal flush: dumping long inventory due to RSI {rsi_value:.2f} > 80."
+                )
+                self._cancel_all_resting_orders()
+                self._place_market_order(
+                    side="SELL",
+                    qty=abs(self.inventory),
+                    tag="reversal_flatten",
+                )
+                continue
 
             bid_price, ask_price = self.market_maker.calculate_quotes(
                 mid_price=self.last_price,
@@ -641,7 +679,7 @@ class LiveTradingEngine:
 
                 self.trading_halted = True
                 self._cancel_all_resting_orders()
-                self._flatten_inventory_market()
+                self._flatten_inventory_market(reason="eod_liquidation")
                 break
 
     async def print_dashboard_loop(self) -> None:
@@ -764,6 +802,38 @@ class LiveTradingEngine:
             "trend_signal": trend_signal,
         }
 
+    @staticmethod
+    def _fmt_optional_float(value: Optional[float], digits: int = 2) -> str:
+        if value is None:
+            return "N/A"
+        return f"{value:.{digits}f}"
+
+    def _log_exec_limit_event(
+        self,
+        action: str,
+        side: str,
+        target_price: float,
+        market_price: Optional[float],
+    ) -> None:
+        print(
+            f"[EXEC] Action: {action} {side} Limit | "
+            f"Target Px: {target_price:.2f} | "
+            f"Mkt Px: {self._fmt_optional_float(market_price, 2)} | "
+            f"Inv: {self.inventory} | "
+            f"RSI: {self._fmt_optional_float(self.latest_indicators.get('rsi'), 2)} | "
+            f"ADX: {self._fmt_optional_float(self.latest_indicators.get('adx'), 2)} | "
+            f"Spread: {self._fmt_optional_float(self.latest_indicators.get('dynamic_spread'), 4)}"
+        )
+
+    def _log_flush_event(self, reason: str, side: str, qty: int) -> None:
+        print(
+            f"[FLUSH] Market Order Triggered | Reason: {reason} | "
+            f"Side: {side} | Qty: {qty} | "
+            f"Inv: {self.inventory} | "
+            f"Mkt Px: {self._fmt_optional_float(self.last_price, 2)} | "
+            f"Entry Px: {self._fmt_optional_float(self.avg_entry_price, 2)}"
+        )
+
     def _replace_order_if_needed(self, side: str, target_price: Optional[float]) -> None:
         if self.trading_halted:
             return
@@ -794,41 +864,7 @@ class LiveTradingEngine:
         if side == "SELL" and self.inventory <= -self.max_inventory:
             return
 
-        # 3. REVERSAL LOGIC (Flatten Before Flip)
-        if self._requires_flatten_before_reversal(side):
-            if self._has_pending_reversal_flatten(side):
-                return
-
-            retry_blocked, retry_reason = self._is_reversal_flatten_retry_blocked(side)
-            if retry_blocked:
-                if retry_reason:
-                    print(retry_reason)
-                return
-
-            # Wait for any active limits to be cleanly canceled by the exchange.
-            if self.active_orders.get("BUY") is not None or self.active_orders.get("SELL") is not None:
-                self._cancel_all_resting_orders()
-                return
-
-            flatten_qty = abs(self.inventory)
-            if flatten_qty > 0:
-                current_side = "short" if self.inventory < 0 else "long"
-                print(
-                    f"Flattening {flatten_qty} {current_side} contracts before opening {side}."
-                )
-                cl_ord_id = self._place_passive_flatten_order(
-                    side=side,
-                    qty=flatten_qty,
-                    tag="reversal_flatten",
-                )
-                if not cl_ord_id:
-                    self._mark_reversal_flatten_failure(
-                        side,
-                        "Passive flatten placement failed",
-                    )
-            return
-
-        # --- THE FRIENDLY FIRE FIX ---
+        # 3. REVERSAL-FLUSH GUARD
         # If the engine is currently in the middle of a reversal flatten (because the OTHER side
         # fired a market order and is waiting for a fill), DO NOT place new limit orders on this side.
         with self._inflight_lock:
@@ -862,14 +898,20 @@ class LiveTradingEngine:
         ):
             return
 
-        # 5. RACE CONDITION FIX
+        # 4. RACE CONDITION FIX
         # If we have an existing order, cancel and wait for exchange confirmation.
         if existing is not None:
             self._cancel_order(existing.cl_ord_id)
             self._cancel_retry_block_until[side] = now + 2.0
             return
 
-        # 6. SAFE TO PLACE (Only when no active local order is tracked)
+        # 5. SAFE TO PLACE (Only when no active local order is tracked)
+        self._log_exec_limit_event(
+            action="PLACE",
+            side=side,
+            target_price=normalized_price,
+            market_price=self.last_price,
+        )
         cl_ord_id = self._place_limit_order(
             side=side,
             qty=self.order_qty,
@@ -928,6 +970,8 @@ class LiveTradingEngine:
             else self.last_price - aggressiveness
         )
         normalized_price = self._normalize_price(aggressive_price)
+        flush_reason = tag or "marketable_flatten"
+        self._log_flush_event(reason=flush_reason, side=side.upper(), qty=qty)
 
         try:
             cl_ord_id = self.client.place_order(
@@ -1517,7 +1561,7 @@ class LiveTradingEngine:
 
         self.trading_halted = True
         self._cancel_all_resting_orders()
-        self._flatten_inventory_market()
+        self._flatten_inventory_market(reason="kill_switch")
 
     def _evaluate_stop_loss(self) -> None:
         if (
@@ -1530,7 +1574,13 @@ class LiveTradingEngine:
 
         with self._inflight_lock:
             is_flushing = any(
-                str(order.get("tag", "")) == "reversal_flatten"
+                str(order.get("tag", "")) in {
+                    "reversal_flatten",
+                    "stop_loss",
+                    "kill_switch",
+                    "risk_flatten",
+                    "eod_liquidation",
+                }
                 for order in self.inflight_market_orders.values()
             )
         if is_flushing:
@@ -1555,7 +1605,7 @@ class LiveTradingEngine:
         self._place_market_order(
             side=side_to_close,
             qty=abs(self.inventory),
-            tag="reversal_flatten",
+            tag="stop_loss",
         )
 
     def _cancel_all_resting_orders(self) -> None:
@@ -1573,14 +1623,14 @@ class LiveTradingEngine:
             # Block duplicate cancel requests while waiting for exchange ack.
             self._cancel_retry_block_until[side] = now + 2.0
 
-    def _flatten_inventory_market(self) -> None:
+    def _flatten_inventory_market(self, reason: str = "risk_flatten") -> None:
         if self.inventory == 0:
             return
 
         if self.inventory > 0:
-            self._place_market_order(side="SELL", qty=abs(self.inventory))
+            self._place_market_order(side="SELL", qty=abs(self.inventory), tag=reason)
         else:
-            self._place_market_order(side="BUY", qty=abs(self.inventory))
+            self._place_market_order(side="BUY", qty=abs(self.inventory), tag=reason)
 
     def _requires_flatten_before_reversal(self, side: str) -> bool:
         if side == "BUY" and self.inventory < 0:
