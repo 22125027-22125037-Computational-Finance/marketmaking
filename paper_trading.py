@@ -178,6 +178,15 @@ class LiveTradingEngine:
             os.getenv("PAPERBROKER_STARTUP_RECOVERY_CANCEL_TIMEOUT_SECONDS", "0.5")
         )
 
+        self.reconciliation_interval_seconds = float(
+            os.getenv("PAPERBROKER_RECONCILIATION_SECONDS", "600")
+        )
+        self.reconciliation_probe_trade_count = (
+            os.getenv("PAPERBROKER_RECON_PROBE_TRADE_COUNT", "1").strip().lower()
+            not in {"0", "false", "no"}
+        )
+        self._printed_trade_api_capabilities = False
+
         self.client = self._build_fix_client()
         self.market_data_client = self._build_kafka_client()
 
@@ -581,7 +590,7 @@ class LiveTradingEngine:
     async def _reconciliation_loop(self) -> None:
         """Periodic state reconciliation via REST to fix FIX drop-copy drift."""
         while not self.trading_halted:
-            await asyncio.sleep(600)
+            await asyncio.sleep(self.reconciliation_interval_seconds)
 
             if self.trading_halted:
                 break
@@ -592,12 +601,20 @@ class LiveTradingEngine:
 
             self._initialize_startup_position()
 
+            if self.reconciliation_probe_trade_count:
+                method_name, broker_trade_count = self._probe_broker_trade_count()
+                if broker_trade_count is not None:
+                    print(
+                        f"Broker Trade Count:     {broker_trade_count} "
+                        f"(via {method_name})"
+                    )
+                    print(f"Local Trade Count:      {self.total_trades_executed}")
+                else:
+                    print("Broker Trade Count:     NOT AVAILABLE")
+
             true_equity = self._pull_equity_from_portfolio()
             if true_equity is not None:
-                # Keep local realized/unrealized decomposition coherent after equity resync.
-                current_unrealized = self._compute_internal_equity() - self.initial_capital - self.realized_pnl
-                self.initial_capital = true_equity - self.realized_pnl - current_unrealized
-                self.current_equity = self._compute_internal_equity()
+                self.current_equity = true_equity
                 print(f"Reconciled Equity:       {self.current_equity:,.0f} VND")
             else:
                 print("Reconciled Equity:       FAILED TO PULL")
@@ -1183,6 +1200,16 @@ class LiveTradingEngine:
         print("Position Synchronization Check")
         print("-" * 40)
 
+        self._log_trade_api_capabilities_once()
+        method_name, broker_trade_count = self._probe_broker_trade_count()
+        if broker_trade_count is not None:
+            print(
+                f"Startup Broker Order Count: {broker_trade_count} "
+                f"(via {method_name})"
+            )
+        else:
+            print("Startup Broker Order Count: NOT AVAILABLE")
+
         def _instrument_matches(target_symbol: str, candidate_symbol: Any) -> bool:
             target = str(target_symbol or "").strip().upper()
             candidate = str(candidate_symbol or "").strip().upper()
@@ -1312,6 +1339,106 @@ class LiveTradingEngine:
             self.avg_entry_price = None
 
         print("-" * 40 + "\n")
+
+    def _log_trade_api_capabilities_once(self) -> None:
+        if self._printed_trade_api_capabilities:
+            return
+
+        self._printed_trade_api_capabilities = True
+        method_names = sorted(
+            name
+            for name in dir(self.client)
+            if any(token in name.lower() for token in ("order", "trade", "execution"))
+            and callable(getattr(self.client, name, None))
+        )
+
+        if method_names:
+            print("SDK Trade/Order Methods: " + ", ".join(method_names))
+        else:
+            print("SDK Trade/Order Methods: NONE DISCOVERED")
+
+    def _probe_broker_trade_count(self) -> Tuple[str, Optional[int]]:
+        preferred_names = [
+            "get_executions",
+            "get_trades",
+            "get_order_history",
+            "get_orders",
+            "list_executions",
+            "list_trades",
+            "list_orders",
+        ]
+
+        discovered = [
+            name
+            for name in dir(self.client)
+            if any(token in name.lower() for token in ("trade", "execution", "order"))
+            and callable(getattr(self.client, name, None))
+        ]
+
+        candidate_names: List[str] = []
+        for name in preferred_names + sorted(discovered):
+            if name not in candidate_names:
+                candidate_names.append(name)
+
+        for method_name in candidate_names:
+            method = getattr(self.client, method_name, None)
+            if method is None or not callable(method):
+                continue
+
+            for arg_mode in ("none", "sub_account"):
+                try:
+                    sub_scope = (
+                        self.client.use_sub_account(self.sub_account)
+                        if hasattr(self.client, "use_sub_account")
+                        else nullcontext()
+                    )
+                    with sub_scope:
+                        payload = method() if arg_mode == "none" else method(self.sub_account)
+                except TypeError:
+                    continue
+                except Exception as exc:
+                    print(f"Skipping {method_name}: {exc}")
+                    continue
+
+                count = self._extract_trade_count_from_payload(payload)
+                if count is not None:
+                    return method_name, count
+
+        return "", None
+
+    @staticmethod
+    def _extract_trade_count_from_payload(payload: Any) -> Optional[int]:
+        if payload is None:
+            return None
+
+        if isinstance(payload, (list, tuple, set)):
+            return len(payload)
+
+        if not isinstance(payload, dict):
+            return None
+
+        if payload.get("success") is False:
+            return None
+
+        for key in (
+            "trades",
+            "executions",
+            "orders",
+            "items",
+            "results",
+            "records",
+            "data",
+        ):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return len(value)
+            if isinstance(value, dict):
+                for nested_key in ("items", "trades", "executions", "orders", "records"):
+                    nested_value = value.get(nested_key)
+                    if isinstance(nested_value, list):
+                        return len(nested_value)
+
+        return None
 
     def _pull_equity_from_portfolio(self) -> Optional[float]:
         try:
