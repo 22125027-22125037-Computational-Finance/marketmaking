@@ -560,7 +560,7 @@ class LiveTradingEngine:
             self.latest_indicators["rsi"] = indicators["rsi"]
             self.latest_indicators["adx"] = indicators["adx"]
             self.latest_indicators["atr"] = indicators["atr"]
-            min_profitable_spread = 1.0
+            min_profitable_spread = 0.5
             floored_dynamic_spread = max(
                 indicators["atr"] * self.spread_multiplier,
                 min_profitable_spread,
@@ -569,8 +569,8 @@ class LiveTradingEngine:
 
             # Signal-driven reversal flattening: only flush when RSI says regime flipped.
             rsi_value = indicators["rsi"]
-            long_signal = rsi_value < 20
-            short_signal = rsi_value > 80
+            long_signal = rsi_value < 30
+            short_signal = rsi_value > 70
 
             should_flatten_short = self.inventory < 0 and long_signal
             should_flatten_long = self.inventory > 0 and short_signal
