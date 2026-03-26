@@ -3,33 +3,31 @@ Starting LiveTradingEngine (async)...
 Waiting for FIX and REST authentication...
 
 ----------------------------------------
-FIX logon successful. Session: FIX.4.4:9629235d865343419b0dc388bbb34960->SERVER
 Account Identity and Mapping Check
 ----------------------------------------
+FIX logon successful. Session: FIX.4.4:9629235d865343419b0dc388bbb34960->SERVER
 FIX SenderCompID (Tag 49): 9629235d865343419b0dc388bbb34960
 Target Sub-Account:        main
 REST Mapping Check:        SUCCESS
-Startup Equity:            494,410,000 VND
+Startup Equity:            494,250,000 VND
 ----------------------------------------
 
 ----------------------------------------
 Position Synchronization Check
 ----------------------------------------
 SDK Trade/Order Methods: cancel_order, get_derivative_orders, get_order_status, get_orders, get_stock_orders, place_order, recover_pending_orders
-[2026-03-26 14:12:28] [WARNING] Timeout waiting for OrderID for main
+[2026-03-26 14:20:14] [WARNING] Timeout waiting for OrderID for main
 Skipping cancel_order: Timeout waiting for OrderID for main
-[2026-03-26 14:12:29] [ERROR] GET https://papertrade.algotrade.vn/accounting/api/account/orders/derivative HTTP error
+[2026-03-26 14:20:14] [ERROR] GET https://papertrade.algotrade.vn/accounting/api/account/orders/derivative HTTP error
 Traceback (most recent call last):
   File "C:\Users\khiem\AppData\Local\Programs\Python\Python39\lib\site-packages\paperbroker\rest\rest_session.py", line 166, in get
     response.raise_for_status()
   File "C:\Users\khiem\AppData\Local\Programs\Python\Python39\lib\site-packages\requests\models.py", line 1024, in raise_for_status
     raise HTTPError(http_error_msg, response=self)
-requests.exceptions.HTTPError: 404 Client Error:  for url: https://papertrade.algotrade.vn/accounting/api/account/orders/derivative?accountID=d8c8d8b3351147869bda099d2d7598eb status_code=404 response_text={"timestamp":"2026-03-26T07:12:32.140+00:00","status":404,"error":"Not Found","path":"/api/account/orders/derivative"}       
-[2026-03-26 14:12:29] [ERROR] event=derivative_orders_fetch_failed accountID=d8c8d8b3351147869bda099d2d7598eb error=404 Client Error:  for url: https://papertrade.algotrade.vn/accounting/api/account/orders/derivative?accountID=d8c8d8b3351147869bda099d2d7598eb
+requests.exceptions.HTTPError: 404 Client Error:  for url: https://papertrade.algotrade.vn/accounting/api/account/orders/derivative?accountID=d8c8d8b3351147869bda099d2d7598eb status_code=404 response_text={"timestamp":"2026-03-26T07:20:17.576+00:00","status":404,"error":"Not Found","path":"/api/account/orders/derivative"}       
+[2026-03-26 14:20:14] [ERROR] event=derivative_orders_fetch_failed accountID=d8c8d8b3351147869bda099d2d7598eb error=404 Client Error:  for url: https://papertrade.algotrade.vn/accounting/api/account/orders/derivative?accountID=d8c8d8b3351147869bda099d2d7598eb
 Startup Broker Order Count: 0 (via get_derivative_orders)
-REST Position Sync:      SUCCESS
-Recovered Inventory:     Long 1
-Recovered Entry Price:   1,786.9
+REST Position Sync:      SUCCESS (No open positions found)
 ----------------------------------------
 
 No pending orders recovered from previous session.
@@ -38,10 +36,10 @@ Subscribing to market data for HNXDS:VN30F2604...
 ====================================================
 LiveTradingEngine Dashboard
 ====================================================
-Market Price:         1,787.50
-Inventory:            Long 1
-Equity:               494,410,060 VND
-PnL:                  60 VND
+Market Price:         1,789.00
+Inventory:            Flat 0
+Equity:               494,250,000 VND
+PnL:                  0 VND
 Total Trades:         0
 State Heals:          0
 RSI(14):              N/A
@@ -52,10 +50,10 @@ Dynamic Spread Width: N/A
 ====================================================
 LiveTradingEngine Dashboard
 ====================================================
-Market Price:         1,787.00
-Inventory:            Long 1
-Equity:               494,410,010 VND
-PnL:                  10 VND
+Market Price:         1,788.70
+Inventory:            Flat 0
+Equity:               494,250,000 VND
+PnL:                  0 VND
 Total Trades:         0
 State Heals:          0
 RSI(14):              N/A
@@ -66,206 +64,364 @@ Dynamic Spread Width: N/A
 ====================================================
 LiveTradingEngine Dashboard
 ====================================================
-Market Price:         1,787.90
-Inventory:            Long 1
-Equity:               494,410,100 VND
-PnL:                  100 VND
+Market Price:         1,792.00
+Inventory:            Flat 0
+Equity:               494,250,000 VND
+PnL:                  0 VND
 Total Trades:         0
 State Heals:          0
 RSI(14):              N/A
 ADX(14):              N/A
 Dynamic Spread Width: N/A
 ====================================================
-[EXEC] Action: PLACE BUY Limit | Target Px: 1786.80 | Mkt Px: 1787.00 | Inv: 1 | RSI: 0.00 | ADX: 21.26 | Spread: 0.5000
+[EXEC] Action: PLACE BUY Limit | Target Px: 1788.50 | Mkt Px: 1789.50 | Inv: 0 | RSI: 66.67 | ADX: 91.08 | Spread: 1.0000
+[EXEC] Action: PLACE SELL Limit | Target Px: 1790.50 | Mkt Px: 1789.50 | Inv: 0 | RSI: 66.67 | ADX: 91.08 | Spread: 1.0000
+Order canceled: side=BUY, cl_ord_id=f115d585
+Order canceled: side=SELL, cl_ord_id=e755e01e
+[EXEC] Action: PLACE BUY Limit | Target Px: 1788.00 | Mkt Px: 1789.00 | Inv: 0 | RSI: 41.67 | ADX: 77.54 | Spread: 1.0000
+[EXEC] Action: PLACE SELL Limit | Target Px: 1790.00 | Mkt Px: 1789.00 | Inv: 0 | RSI: 41.67 | ADX: 77.54 | Spread: 1.0000
 
 ====================================================
 LiveTradingEngine Dashboard
 ====================================================
-Market Price:         1,787.00
-Inventory:            Long 1
-Equity:               494,410,010 VND
-PnL:                  10 VND
+Market Price:         1,788.50
+Inventory:            Flat 0
+Equity:               494,250,000 VND
+PnL:                  0 VND
 Total Trades:         0
 State Heals:          0
-RSI(14):              0.00
-ADX(14):              21.26
-Dynamic Spread Width: 0.5000
+RSI(14):              35.71
+ADX(14):              72.44
+Dynamic Spread Width: 1.0000
 ====================================================
-[EXEC] Action: PLACE SELL Limit | Target Px: 1787.90 | Mkt Px: 1787.40 | Inv: 1 | RSI: 57.14 | ADX: 21.90 | Spread: 0.5000
-Signal reversal flush: dumping long inventory due to RSI 90.00 > 70.
-[FLUSH] Market Order Triggered | Reason: reversal_flatten | Side: SELL | Qty: 1 | Inv: 1 | Mkt Px: 1787.90 | Entry Px: 1786.90
-Order canceled: side=BUY, cl_ord_id=f89d8e74
-Order canceled: side=SELL, cl_ord_id=6ebfe668
-[EXEC] Action: PLACE BUY Limit | Target Px: 1786.80 | Mkt Px: 1787.30 | Inv: 0 | RSI: 56.25 | ADX: 31.49 | Spread: 0.5000
-[EXEC] Action: PLACE SELL Limit | Target Px: 1787.80 | Mkt Px: 1787.30 | Inv: 0 | RSI: 56.25 | ADX: 31.49 | Spread: 0.5000
-Order canceled: side=SELL, cl_ord_id=646d555b
+Order canceled: side=SELL, cl_ord_id=8d12fa94
+Order canceled: side=BUY, cl_ord_id=60c3d16e
+[EXEC] Action: PLACE BUY Limit | Target Px: 1788.30 | Mkt Px: 1789.30 | Inv: 0 | RSI: 50.00 | ADX: 25.73 | Spread: 1.0000
+[EXEC] Action: PLACE SELL Limit | Target Px: 1790.30 | Mkt Px: 1789.30 | Inv: 0 | RSI: 50.00 | ADX: 25.73 | Spread: 1.0000
 
 ====================================================
 LiveTradingEngine Dashboard
 ====================================================
-Market Price:         1,787.30
+Market Price:         1,789.50
 Inventory:            Flat 0
-Equity:               494,370,050 VND
-PnL:                  -39,950 VND
-Total Trades:         1
+Equity:               494,250,000 VND
+PnL:                  0 VND
+Total Trades:         0
 State Heals:          0
-RSI(14):              12.50
-ADX(14):              21.93
-Dynamic Spread Width: 0.5000
+RSI(14):              66.67
+ADX(14):              13.80
+Dynamic Spread Width: 1.0000
 ====================================================
-Order canceled: side=BUY, cl_ord_id=99ee31f1
-[EXEC] Action: PLACE SELL Limit | Target Px: 1787.90 | Mkt Px: 1787.40 | Inv: 0 | RSI: 54.55 | ADX: 17.14 | Spread: 0.5000
-[EXEC] Action: PLACE BUY Limit | Target Px: 1787.20 | Mkt Px: 1787.70 | Inv: 0 | RSI: 60.00 | ADX: 20.29 | Spread: 0.5000
-Order canceled: side=SELL, cl_ord_id=045ef152
-
-====================================================
-LiveTradingEngine Dashboard
-====================================================
-Market Price:         1,787.80
-Inventory:            Flat 0
-Equity:               494,370,050 VND
-PnL:                  -39,950 VND
-Total Trades:         1
-State Heals:          0
-RSI(14):              59.26
-ADX(14):              16.22
-Dynamic Spread Width: 0.5000
-====================================================
-[EXEC] Action: PLACE SELL Limit | Target Px: 1788.40 | Mkt Px: 1787.90 | Inv: 0 | RSI: 58.33 | ADX: 7.88 | Spread: 0.5000
-Order canceled: side=BUY, cl_ord_id=0e0dc961
-[EXEC] Action: PLACE BUY Limit | Target Px: 1787.20 | Mkt Px: 1787.40 | Inv: 0 | RSI: 16.67 | ADX: 20.64 | Spread: 0.5000
-Order canceled: side=SELL, cl_ord_id=565d99bb
-[EXEC] Action: PLACE SELL Limit | Target Px: 1788.40 | Mkt Px: 1787.90 | Inv: 0 | RSI: 52.94 | ADX: 21.57 | Spread: 0.5000
-
-====================================================
-LiveTradingEngine Dashboard
-====================================================
-Market Price:         1,788.40
-Inventory:            Flat 0
-Equity:               494,370,050 VND
-PnL:                  -39,950 VND
-Total Trades:         1
-State Heals:          0
-RSI(14):              63.64
-ADX(14):              24.09
-Dynamic Spread Width: 0.5000
-====================================================
-Order canceled: side=BUY, cl_ord_id=de4dcddd
-[EXEC] Action: PLACE SELL Limit | Target Px: 1789.10 | Mkt Px: 1788.60 | Inv: -1 | RSI: 66.67 | ADX: 29.64 | Spread: 0.5000
-[EXEC] Action: PLACE BUY Limit | Target Px: 1788.30 | Mkt Px: 1788.80 | Inv: -1 | RSI: 70.00 | ADX: 32.54 | Spread: 0.5000
-Order canceled: side=BUY, cl_ord_id=f4f968c5
-Order canceled: side=SELL, cl_ord_id=9dfdc2e4
-[EXEC] Action: PLACE BUY Limit | Target Px: 1788.60 | Mkt Px: 1789.10 | Inv: -1 | RSI: 66.67 | ADX: 37.96 | Spread: 0.5000
-[EXEC] Action: PLACE SELL Limit | Target Px: 1789.50 | Mkt Px: 1789.00 | Inv: -1 | RSI: 42.86 | ADX: 35.92 | Spread: 0.5000
+Order canceled: side=BUY, cl_ord_id=2501dcae
+Order canceled: side=SELL, cl_ord_id=cebf561b
+[EXEC] Action: PLACE BUY Limit | Target Px: 1788.60 | Mkt Px: 1789.60 | Inv: 0 | RSI: 57.50 | ADX: 10.21 | Spread: 1.0000
+[EXEC] Action: PLACE SELL Limit | Target Px: 1790.60 | Mkt Px: 1789.60 | Inv: 0 | RSI: 57.50 | ADX: 10.21 | Spread: 1.0000
 
 ====================================================
 LiveTradingEngine Dashboard
 ====================================================
 Market Price:         1,789.00
-Inventory:            Short 1
-Equity:               494,330,030 VND
-PnL:                  -79,970 VND
-Total Trades:         2
-State Heals:          0
-RSI(14):              42.86
-ADX(14):              35.92
-Dynamic Spread Width: 0.5000
-====================================================
-Order canceled: side=BUY, cl_ord_id=2d16fcf2
-[EXEC] Action: PLACE SELL Limit | Target Px: 1790.40 | Mkt Px: 1789.90 | Inv: -2 | RSI: 68.18 | ADX: 29.47 | Spread: 0.5000
-[EXEC] Action: PLACE BUY Limit | Target Px: 1789.10 | Mkt Px: 1789.60 | Inv: -2 | RSI: 60.00 | ADX: 29.83 | Spread: 0.5000
-Order canceled: side=SELL, cl_ord_id=39e87a6e
-
-====================================================
-LiveTradingEngine Dashboard
-====================================================
-Market Price:         1,789.20
-Inventory:            Short 2
-Equity:               494,290,070 VND
-PnL:                  -119,930 VND
-Total Trades:         3
-State Heals:          0
-RSI(14):              51.72
-ADX(14):              16.58
-Dynamic Spread Width: 0.5000
-====================================================
-[EXEC] Action: PLACE BUY Limit | Target Px: 1788.50 | Mkt Px: 1789.00 | Inv: -1 | RSI: 53.57 | ADX: 17.09 | Spread: 0.5000
-[EXEC] Action: PLACE SELL Limit | Target Px: 1789.90 | Mkt Px: 1789.40 | Inv: -1 | RSI: 59.38 | ADX: 18.43 | Spread: 0.5000
-
-====================================================
-LiveTradingEngine Dashboard
-====================================================
-Market Price:         1,789.10
-Inventory:            Short 1
-Equity:               494,250,090 VND
-PnL:                  -159,910 VND
-Total Trades:         4
-State Heals:          0
-RSI(14):              46.15
-ADX(14):              15.55
-Dynamic Spread Width: 0.5000
-====================================================
-Order canceled: side=BUY, cl_ord_id=435f7b5a
-[EXEC] Action: PLACE BUY Limit | Target Px: 1788.60 | Mkt Px: 1789.10 | Inv: -1 | RSI: 47.62 | ADX: 12.14 | Spread: 0.5000
-Order canceled: side=SELL, cl_ord_id=a53648ba
-[EXEC] Action: PLACE SELL Limit | Target Px: 1790.30 | Mkt Px: 1789.80 | Inv: -1 | RSI: 57.69 | ADX: 13.94 | Spread: 0.5000
-[EXEC] Action: PLACE SELL Limit | Target Px: 1791.10 | Mkt Px: 1790.60 | Inv: -2 | RSI: 67.65 | ADX: 15.72 | Spread: 0.5000
-Order canceled: side=BUY, cl_ord_id=30901c49
-[EXEC] Action: PLACE SELL Limit | Target Px: 1791.60 | Mkt Px: 1791.40 | Inv: -3 | RSI: 79.49 | ADX: 21.81 | Spread: 0.5000
-
-====================================================
-LiveTradingEngine Dashboard
-====================================================
-Market Price:         1,791.70
-Inventory:            Short 3
-Equity:               494,169,670 VND
-PnL:                  -240,330 VND
-Total Trades:         6
-State Heals:          0
-RSI(14):              85.00
-ADX(14):              24.96
-Dynamic Spread Width: 0.5000
-====================================================
-Order canceled: side=SELL, cl_ord_id=f9b98d5f
-[EXEC] Action: PLACE BUY Limit | Target Px: 1790.60 | Mkt Px: 1791.10 | Inv: -3 | RSI: 69.77 | ADX: 33.81 | Spread: 0.5000
-[EXEC] Action: PLACE SELL Limit | Target Px: 1791.60 | Mkt Px: 1791.10 | Inv: -3 | RSI: 69.77 | ADX: 33.81 | Spread: 0.5000
-[EXEC] Action: PLACE BUY Limit | Target Px: 1789.80 | Mkt Px: 1790.30 | Inv: -2 | RSI: 58.00 | ADX: 38.48 | Spread: 0.5000
-Order canceled: side=SELL, cl_ord_id=5d9a4a53
-
-====================================================
-LiveTradingEngine Dashboard
-====================================================
-Market Price:         1,790.70
-Inventory:            Short 2
-Equity:               494,130,000 VND
-PnL:                  -280,000 VND
-Total Trades:         7
-State Heals:          0
-RSI(14):              60.00
-ADX(14):              39.40
-Dynamic Spread Width: 0.5000
-====================================================
-[EXEC] Action: PLACE SELL Limit | Target Px: 1791.40 | Mkt Px: 1790.90 | Inv: -2 | RSI: 56.25 | ADX: 20.89 | Spread: 0.5000
-Order canceled: side=BUY, cl_ord_id=d0a28e1c
-Signal reversal flush: covering short inventory due to RSI 28.57 < 30.
-[FLUSH] Market Order Triggered | Reason: reversal_flatten | Side: BUY | Qty: 2 | Inv: -2 | Mkt Px: 1790.70 | Entry Px: 1790.37
-Order canceled: side=SELL, cl_ord_id=036ebf34
-[EXEC] Action: PLACE BUY Limit | Target Px: 1790.40 | Mkt Px: 1790.90 | Inv: 0 | RSI: 66.67 | ADX: 27.42 | Spread: 0.5000
-[EXEC] Action: PLACE SELL Limit | Target Px: 1791.20 | Mkt Px: 1790.70 | Inv: 0 | RSI: 50.00 | ADX: 27.83 | Spread: 0.5000
-
-====================================================
-LiveTradingEngine Dashboard
-====================================================
-Market Price:         1,790.70
 Inventory:            Flat 0
-Equity:               494,049,970 VND
-PnL:                  -360,030 VND
-Total Trades:         9
+Equity:               494,250,000 VND
+PnL:                  0 VND
+Total Trades:         0
+State Heals:          0
+RSI(14):              42.11
+ADX(14):              12.43
+Dynamic Spread Width: 1.0000
+====================================================
+Order canceled: side=SELL, cl_ord_id=c95ebedd
+Order canceled: side=BUY, cl_ord_id=4a471222
+[EXEC] Action: PLACE BUY Limit | Target Px: 1787.30 | Mkt Px: 1788.30 | Inv: 0 | RSI: 36.36 | ADX: 16.70 | Spread: 1.0000
+[EXEC] Action: PLACE SELL Limit | Target Px: 1789.30 | Mkt Px: 1788.30 | Inv: 0 | RSI: 36.36 | ADX: 16.70 | Spread: 1.0000
+Order canceled: side=BUY, cl_ord_id=89b8cf89
+Order canceled: side=SELL, cl_ord_id=2deb22b0
+
+====================================================
+LiveTradingEngine Dashboard
+====================================================
+Market Price:         1,788.10
+Inventory:            Flat 0
+Equity:               494,250,000 VND
+PnL:                  0 VND
+Total Trades:         0
+State Heals:          0
+RSI(14):              14.29
+ADX(14):              26.81
+Dynamic Spread Width: 1.0000
+====================================================
+[EXEC] Action: PLACE BUY Limit | Target Px: 1787.40 | Mkt Px: 1788.40 | Inv: 0 | RSI: 31.25 | ADX: 39.07 | Spread: 1.0000
+[EXEC] Action: PLACE SELL Limit | Target Px: 1789.40 | Mkt Px: 1788.40 | Inv: 0 | RSI: 31.25 | ADX: 39.07 | Spread: 1.0000
+Order canceled: side=BUY, cl_ord_id=9a838e87
+Order canceled: side=SELL, cl_ord_id=abf450ab
+[EXEC] Action: PLACE BUY Limit | Target Px: 1787.10 | Mkt Px: 1788.10 | Inv: 0 | RSI: 43.75 | ADX: 37.60 | Spread: 1.0000
+[EXEC] Action: PLACE SELL Limit | Target Px: 1789.10 | Mkt Px: 1788.10 | Inv: 0 | RSI: 43.75 | ADX: 37.60 | Spread: 1.0000
+
+====================================================
+LiveTradingEngine Dashboard
+====================================================
+Market Price:         1,788.10
+Inventory:            Flat 0
+Equity:               494,250,000 VND
+PnL:                  0 VND
+Total Trades:         0
 State Heals:          0
 RSI(14):              50.00
-ADX(14):              22.92
-Dynamic Spread Width: 0.5000
+ADX(14):              31.70
+Dynamic Spread Width: 1.0000
 ====================================================
+Order canceled: side=BUY, cl_ord_id=e8128a6c
+Order canceled: side=SELL, cl_ord_id=88a754a8
+[EXEC] Action: PLACE BUY Limit | Target Px: 1787.30 | Mkt Px: 1788.30 | Inv: 0 | RSI: 57.14 | ADX: 15.19 | Spread: 1.0000
+[EXEC] Action: PLACE SELL Limit | Target Px: 1789.30 | Mkt Px: 1788.30 | Inv: 0 | RSI: 57.14 | ADX: 15.19 | Spread: 1.0000
+
+====================================================
+LiveTradingEngine Dashboard
+====================================================
+Market Price:         1,788.10
+Inventory:            Flat 0
+Equity:               494,250,000 VND
+PnL:                  0 VND
+Total Trades:         0
+State Heals:          0
+RSI(14):              52.00
+ADX(14):              13.16
+Dynamic Spread Width: 1.0000
+====================================================
+Order canceled: side=BUY, cl_ord_id=40afe35b
+Order canceled: side=SELL, cl_ord_id=634d163d
+[EXEC] Action: PLACE BUY Limit | Target Px: 1790.20 | Mkt Px: 1792.00 | Inv: 0 | RSI: 65.35 | ADX: 31.33 | Spread: 1.8143
+[EXEC] Action: PLACE SELL Limit | Target Px: 1793.80 | Mkt Px: 1792.00 | Inv: 0 | RSI: 65.35 | ADX: 31.33 | Spread: 1.8143
+[EXEC] Action: PLACE BUY Limit | Target Px: 1790.00 | Mkt Px: 1791.70 | Inv: 1 | RSI: 65.29 | ADX: 34.07 | Spread: 1.7286
+[EXEC] Action: PLACE BUY Limit | Target Px: 1786.40 | Mkt Px: 1788.10 | Inv: 2 | RSI: 35.00 | ADX: 34.23 | Spread: 1.7143
+Order canceled: side=BUY, cl_ord_id=6242b555
+Order canceled: side=SELL, cl_ord_id=bbd6f817
+
+====================================================
+LiveTradingEngine Dashboard
+====================================================
+Market Price:         1,788.50
+Inventory:            Long 2
+Equity:               494,170,020 VND
+PnL:                  -79,980 VND
+Total Trades:         2
+State Heals:          0
+RSI(14):              15.69
+ADX(14):              34.50
+Dynamic Spread Width: 1.0000
+====================================================
+[EXEC] Action: PLACE BUY Limit | Target Px: 1787.60 | Mkt Px: 1788.60 | Inv: 2 | RSI: 61.90 | ADX: 46.88 | Spread: 1.0000
+[EXEC] Action: PLACE SELL Limit | Target Px: 1789.60 | Mkt Px: 1788.60 | Inv: 2 | RSI: 61.90 | ADX: 46.88 | Spread: 1.0000
+
+====================================================
+LiveTradingEngine Dashboard
+====================================================
+Market Price:         1,788.70
+Inventory:            Long 2
+Equity:               494,170,060 VND
+PnL:                  -79,940 VND
+Total Trades:         2
+State Heals:          0
+Order canceled: side=SELL, cl_ord_id=0caa3966
+[EXEC] Action: PLACE BUY Limit | Target Px: 1789.50 | Mkt Px: 1792.00 | Inv: 2 | RSI: 60.00 | ADX: 16.34 | Spread: 2.5000      
+[EXEC] Action: PLACE SELL Limit | Target Px: 1791.50 | Mkt Px: 1788.50 | Inv: 2 | RSI: 50.00 | ADX: 16.00 | Spread: 3.0000     
+[EXEC] Action: PLACE BUY Limit | Target Px: 1786.30 | Mkt Px: 1788.20 | Inv: 3 | RSI: 48.15 | ADX: 11.94 | Spread: 1.9286      
+Order canceled: side=SELL, cl_ord_id=23c04f64
+Order canceled: side=BUY, cl_ord_id=cd7b4d11
+[EXEC] Action: PLACE BUY Limit | Target Px: 1787.20 | Mkt Px: 1788.20 | Inv: 3 | RSI: 50.00 | ADX: 47.15 | Spread: 1.0000      
+[EXEC] Action: PLACE SELL Limit | Target Px: 1789.20 | Mkt Px: 1788.20 | Inv: 3 | RSI: 50.00 | ADX: 47.15 | Spread: 1.0000     
+
+====================================================
+LiveTradingEngine Dashboard
+====================================================
+Market Price:         1,788.30
+Inventory:            Long 3
+Equity:               494,129,960 VND
+PnL:                  -120,040 VND
+Total Trades:         3
+State Heals:          0
+RSI(14):              55.56
+ADX(14):              44.21
+Dynamic Spread Width: 1.0000
+====================================================
+Signal reversal flush: dumping long inventory due to RSI 88.89 > 80.
+[FLUSH] Market Order Triggered | Reason: reversal_flatten | Side: SELL | Qty: 3 | Inv: 3 | Mkt Px: 1791.60 | Entry Px: 1788.43
+Order canceled: side=BUY, cl_ord_id=da9db118
+Order canceled: side=SELL, cl_ord_id=65492ab1
+Reversal flatten order 38d0c768 stale > 3.0s. Canceling for one-tick escalation.
+Reversal flatten for SELL timed out; escalating to 1 tick(s).
+[EXEC] Action: PLACE BUY Limit | Target Px: 1787.80 | Mkt Px: 1788.80 | Inv: 3 | RSI: 40.00 | ADX: 72.86 | Spread: 1.0000
+[EXEC] Action: PLACE SELL Limit | Target Px: 1789.80 | Mkt Px: 1788.80 | Inv: 3 | RSI: 40.00 | ADX: 72.86 | Spread: 1.0000     
+Signal reversal flush: dumping long inventory due to RSI 81.82 > 80.
+[FLUSH] Market Order Triggered | Reason: reversal_flatten | Side: SELL | Qty: 3 | Inv: 3 | Mkt Px: 1789.60 | Entry Px: 1788.43
+Order canceled: side=BUY, cl_ord_id=d3059f5d
+Order canceled: side=SELL, cl_ord_id=6f158bdd
+[EXEC] Action: PLACE BUY Limit | Target Px: 1788.20 | Mkt Px: 1789.20 | Inv: 0 | RSI: 46.15 | ADX: 63.67 | Spread: 1.0000
+[EXEC] Action: PLACE SELL Limit | Target Px: 1790.20 | Mkt Px: 1789.20 | Inv: 0 | RSI: 46.15 | ADX: 63.67 | Spread: 1.0000
+Order canceled: side=SELL, cl_ord_id=d220f862
+Order canceled: side=BUY, cl_ord_id=55fbea61
+
+====================================================
+LiveTradingEngine Dashboard
+====================================================
+Market Price:         1,789.00
+Inventory:            Flat 0
+Equity:               494,010,240 VND
+PnL:                  -239,760 VND
+Total Trades:         6
+State Heals:          0
+RSI(14):              34.94
+ADX(14):              33.07
+Dynamic Spread Width: 1.1857
+====================================================
+[EXEC] Action: PLACE BUY Limit | Target Px: 1790.50 | Mkt Px: 1791.50 | Inv: 0 | RSI: 50.85 | ADX: 13.00 | Spread: 1.0000
+[EXEC] Action: PLACE SELL Limit | Target Px: 1792.50 | Mkt Px: 1791.50 | Inv: 0 | RSI: 50.85 | ADX: 13.00 | Spread: 1.0000
+[EXEC] Action: PLACE BUY Limit | Target Px: 1787.90 | Mkt Px: 1788.40 | Inv: 1 | RSI: 0.00 | ADX: 37.20 | Spread: 1.0000
+Signal reversal flush: dumping long inventory due to RSI 93.55 > 80.
+[FLUSH] Market Order Triggered | Reason: reversal_flatten | Side: SELL | Qty: 1 | Inv: 1 | Mkt Px: 1791.30 | Entry Px: 1788.90
+Order canceled: side=SELL, cl_ord_id=ebbc3eb6
+Order canceled: side=BUY, cl_ord_id=d60792d4
+Reversal flatten order b3ef40f3 stale > 3.0s. Canceling for one-tick escalation.
+Reversal flatten for SELL timed out; escalating to 1 tick(s).
+[EXEC] Action: PLACE BUY Limit | Target Px: 1786.80 | Mkt Px: 1788.30 | Inv: 1 | RSI: 33.33 | ADX: 16.31 | Spread: 1.5429
+[EXEC] Action: PLACE SELL Limit | Target Px: 1789.80 | Mkt Px: 1788.30 | Inv: 1 | RSI: 33.33 | ADX: 16.31 | Spread: 1.5429
+Signal reversal flush: dumping long inventory due to RSI 95.24 > 80.
+[FLUSH] Market Order Triggered | Reason: reversal_flatten | Side: SELL | Qty: 1 | Inv: 1 | Mkt Px: 1791.90 | Entry Px: 1788.90
+Order canceled: side=BUY, cl_ord_id=088fbb90
+Order canceled: side=SELL, cl_ord_id=6d8148eb
+
+====================================================
+LiveTradingEngine Dashboard
+====================================================
+Market Price:         1,792.00
+Inventory:            Long 1
+Equity:               493,970,550 VND
+PnL:                  -279,450 VND
+Total Trades:         7
+State Heals:          0
+RSI(14):              50.62
+ADX(14):              5.60
+Dynamic Spread Width: 1.1571
+====================================================
+Reversal flatten order 0809f98d stale > 3.0s. Canceling for one-tick escalation.
+Reversal flatten for SELL timed out; escalating to 2 tick(s).
+[EXEC] Action: PLACE BUY Limit | Target Px: 1790.80 | Mkt Px: 1791.90 | Inv: 1 | RSI: 53.33 | ADX: 29.12 | Spread: 1.0714
+[EXEC] Action: PLACE SELL Limit | Target Px: 1793.00 | Mkt Px: 1791.90 | Inv: 1 | RSI: 53.33 | ADX: 29.12 | Spread: 1.0714
+[EXEC] Action: PLACE BUY Limit | Target Px: 1786.50 | Mkt Px: 1788.10 | Inv: 2 | RSI: 32.11 | ADX: 33.19 | Spread: 1.5571
+Signal reversal flush: dumping long inventory due to RSI 86.67 > 80.
+[FLUSH] Market Order Triggered | Reason: reversal_flatten | Side: SELL | Qty: 2 | Inv: 2 | Mkt Px: 1791.40 | Entry Px: 1788.70
+Order canceled: side=BUY, cl_ord_id=1883c067
+Order canceled: side=SELL, cl_ord_id=82bf8575
+[EXEC] Action: PLACE BUY Limit | Target Px: 1787.30 | Mkt Px: 1788.40 | Inv: 0 | RSI: 51.35 | ADX: 64.09 | Spread: 1.0571
+[EXEC] Action: PLACE SELL Limit | Target Px: 1789.50 | Mkt Px: 1788.40 | Inv: 0 | RSI: 51.35 | ADX: 64.09 | Spread: 1.0571
+[EXEC] Action: PLACE SELL Limit | Target Px: 1793.00 | Mkt Px: 1791.90 | Inv: -1 | RSI: 53.85 | ADX: 62.70 | Spread: 1.1143
+Order canceled: side=BUY, cl_ord_id=a67b955d
+Order canceled: side=SELL, cl_ord_id=b853ea07
+
+====================================================
+LiveTradingEngine Dashboard
+====================================================
+Market Price:         1,792.00
+Inventory:            Short 1
+Equity:               493,810,750 VND
+PnL:                  -439,250 VND
+Total Trades:         11
+State Heals:          0
+RSI(14):              64.35
+ADX(14):              64.15
+Dynamic Spread Width: 1.6429
+====================================================
+[EXEC] Action: PLACE BUY Limit | Target Px: 1785.90 | Mkt Px: 1788.50 | Inv: -1 | RSI: 40.76 | ADX: 25.83 | Spread: 2.6286
+[EXEC] Action: PLACE SELL Limit | Target Px: 1791.10 | Mkt Px: 1788.50 | Inv: -1 | RSI: 40.76 | ADX: 25.83 | Spread: 2.6286
+[EXEC] Action: PLACE SELL Limit | Target Px: 1789.70 | Mkt Px: 1788.50 | Inv: -2 | RSI: 51.19 | ADX: 17.04 | Spread: 1.2000
+Signal reversal flush: covering short inventory due to RSI 14.29 < 20.
+[FLUSH] Market Order Triggered | Reason: reversal_flatten | Side: BUY | Qty: 2 | Inv: -2 | Mkt Px: 1788.40 | Entry Px: 1791.55
+Order canceled: side=BUY, cl_ord_id=156bb498
+Order canceled: side=SELL, cl_ord_id=8b7ad4b8
+[EXEC] Action: PLACE BUY Limit | Target Px: 1789.50 | Mkt Px: 1791.50 | Inv: 0 | RSI: 50.00 | ADX: 12.69 | Spread: 2.0000
+[EXEC] Action: PLACE SELL Limit | Target Px: 1793.50 | Mkt Px: 1791.50 | Inv: 0 | RSI: 50.00 | ADX: 12.69 | Spread: 2.0000
+[EXEC] Action: PLACE BUY Limit | Target Px: 1790.50 | Mkt Px: 1792.00 | Inv: 1 | RSI: 65.42 | ADX: 13.98 | Spread: 1.5286
+[EXEC] Action: PLACE BUY Limit | Target Px: 1790.40 | Mkt Px: 1791.40 | Inv: 2 | RSI: 45.45 | ADX: 9.77 | Spread: 1.0000
+Signal reversal flush: dumping long inventory due to RSI 83.33 > 80.
+[FLUSH] Market Order Triggered | Reason: reversal_flatten | Side: SELL | Qty: 3 | Inv: 3 | Mkt Px: 1791.90 | Entry Px: 1788.67
+Order canceled: side=SELL, cl_ord_id=9d5feda8
+
+====================================================
+LiveTradingEngine Dashboard
+====================================================
+Market Price:         1,791.40
+Inventory:            Flat 0
+Equity:               493,452,180 VND
+PnL:                  -797,820 VND
+Total Trades:         20
+State Heals:          0
+RSI(14):              85.71
+ADX(14):              41.26
+Dynamic Spread Width: 1.0000
+====================================================
+[EXEC] Action: PLACE BUY Limit | Target Px: 1790.40 | Mkt Px: 1791.40 | Inv: 0 | RSI: 46.15 | ADX: 56.02 | Spread: 1.0000
+[EXEC] Action: PLACE BUY Limit | Target Px: 1790.70 | Mkt Px: 1791.80 | Inv: 1 | RSI: 52.70 | ADX: 53.93 | Spread: 1.0571
+[EXEC] Action: PLACE BUY Limit | Target Px: 1787.40 | Mkt Px: 1788.80 | Inv: 2 | RSI: 34.34 | ADX: 39.60 | Spread: 1.4143
+[EXEC] Action: PLACE SELL Limit | Target Px: 1791.00 | Mkt Px: 1788.90 | Inv: 2 | RSI: 41.50 | ADX: 19.67 | Spread: 2.1000
+Order canceled: side=BUY, cl_ord_id=f84e7f39
+Order canceled: side=SELL, cl_ord_id=012f18ee
+[EXEC] Action: PLACE BUY Limit | Target Px: 1791.00 | Mkt Px: 1792.00 | Inv: 2 | RSI: 66.67 | ADX: 92.11 | Spread: 1.0000
+[EXEC] Action: PLACE SELL Limit | Target Px: 1793.00 | Mkt Px: 1792.00 | Inv: 2 | RSI: 66.67 | ADX: 92.11 | Spread: 1.0000
+[EXEC] Action: PLACE BUY Limit | Target Px: 1788.50 | Mkt Px: 1789.00 | Inv: 3 | RSI: 0.00 | ADX: 91.22 | Spread: 1.0000
+
+====================================================
+LiveTradingEngine Dashboard
+====================================================
+Market Price:         1,789.30
+Inventory:            Long 3
+Equity:               493,332,260 VND
+PnL:                  -917,740 VND
+Total Trades:         23
+State Heals:          0
+RSI(14):              49.29
+ADX(14):              19.89
+Dynamic Spread Width: 2.0000
+====================================================
+Order canceled: side=SELL, cl_ord_id=54097ece
+Order canceled: side=BUY, cl_ord_id=732e9aae
+[EXEC] Action: PLACE BUY Limit | Target Px: 1788.60 | Mkt Px: 1789.60 | Inv: 3 | RSI: 42.86 | ADX: 27.44 | Spread: 1.0000
+[EXEC] Action: PLACE SELL Limit | Target Px: 1790.60 | Mkt Px: 1789.60 | Inv: 3 | RSI: 42.86 | ADX: 27.44 | Spread: 1.0000
+Order canceled: side=BUY, cl_ord_id=200529a4
+Order canceled: side=SELL, cl_ord_id=c89e6749
+
+====================================================
+LiveTradingEngine Dashboard
+====================================================
+Market Price:         1,789.40
+Inventory:            Long 3
+Equity:               493,332,290 VND
+PnL:                  -917,710 VND
+Total Trades:         23
+State Heals:          0
+RSI(14):              33.33
+ADX(14):              42.86
+Dynamic Spread Width: 1.0000
+====================================================
+Signal reversal flush: dumping long inventory due to RSI 81.25 > 80.
+[FLUSH] Market Order Triggered | Reason: reversal_flatten | Side: SELL | Qty: 3 | Inv: 3 | Mkt Px: 1790.70 | Entry Px: 1789.03
+[EXEC] Action: PLACE SELL Limit | Target Px: 1791.30 | Mkt Px: 1790.80 | Inv: 0 | RSI: 87.50 | ADX: 62.13 | Spread: 1.0000
+[EXEC] Action: PLACE BUY Limit | Target Px: 1789.80 | Mkt Px: 1790.80 | Inv: 0 | RSI: 50.00 | ADX: 76.79 | Spread: 1.0000
+
+====================================================
+LiveTradingEngine Dashboard
+====================================================
+Market Price:         1,790.80
+Inventory:            Flat 0
+Equity:               493,212,660 VND
+PnL:                  -1,037,340 VND
+Total Trades:         26
+State Heals:          0
+RSI(14):              50.00
+ADX(14):              76.79
+Dynamic Spread Width: 1.0000
+====================================================
+Order canceled: side=SELL, cl_ord_id=73abb8a5
 Stopping LiveTradingEngine...
 FIX logout received. Session: FIX.4.4:9629235d865343419b0dc388bbb34960->SERVER | Reason: Normal logout
 Keyboard interrupt received. Shutting down.
+PS D:\Y4 Sem 2\Computational Finance\marketmaking> 

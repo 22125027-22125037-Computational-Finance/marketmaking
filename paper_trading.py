@@ -120,8 +120,9 @@ class LiveTradingEngine:
             "dynamic_spread": None,
         }
 
-        self.prices: Deque[float] = deque(maxlen=100)
-        self.min_points_for_signals = 60
+        self.prices: Deque[float] = deque(maxlen=300)
+        self._last_price_append_time = 0.0
+        self.min_points_for_signals = 100
 
         self.active_orders: Dict[str, Optional[ActiveOrder]] = {"BUY": None, "SELL": None}
         # Track in-flight non-quote orders (marketable and passive flatten orders).
@@ -473,7 +474,10 @@ class LiveTradingEngine:
             return
 
         self.last_price = latest_price
-        self.prices.append(latest_price)
+        now = time.time()
+        if now - self._last_price_append_time >= 1.0:
+            self.prices.append(latest_price)
+            self._last_price_append_time = now
 
     async def _trading_logic_loop(self) -> None:
         """Background task to calculate indicators and place orders."""
@@ -716,8 +720,8 @@ class LiveTradingEngine:
             print(f"PnL:                  {pnl:,.0f} VND")
             print(f"Total Trades:         {self.total_trades_executed}")
             print(f"State Heals:          {self.state_heal_count}")
-            print(f"RSI(14):              {rsi_str}")
-            print(f"ADX(14):              {adx_str}")
+            print(f"RSI(45):              {rsi_str}")
+            print(f"ADX(45):              {adx_str}")
             print(f"Dynamic Spread Width: {spread_str}")
             print("=" * 52)
 
@@ -751,8 +755,8 @@ class LiveTradingEngine:
 
         gain = delta.clip(lower=0.0)
         loss = -delta.clip(upper=0.0)
-        avg_gain = gain.rolling(window=14, min_periods=14).mean()
-        avg_loss = loss.rolling(window=14, min_periods=14).mean()
+        avg_gain = gain.rolling(window=45, min_periods=45).mean()
+        avg_loss = loss.rolling(window=45, min_periods=45).mean()
         rs = avg_gain / avg_loss.replace(0.0, pd.NA)
         rsi = 100 - (100 / (1 + rs))
 
@@ -769,7 +773,7 @@ class LiveTradingEngine:
             axis=1,
         )
         true_range = tr_components.max(axis=1)
-        atr = true_range.rolling(window=14, min_periods=14).mean()
+        atr = true_range.rolling(window=45, min_periods=45).mean()
 
         up_move = high.diff()
         down_move = -low.diff()
@@ -777,12 +781,12 @@ class LiveTradingEngine:
         plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
         minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
 
-        atr_smoothed = true_range.rolling(window=14, min_periods=14).sum()
-        plus_di = 100 * (plus_dm.rolling(window=14, min_periods=14).sum() / atr_smoothed)
-        minus_di = 100 * (minus_dm.rolling(window=14, min_periods=14).sum() / atr_smoothed)
+        atr_smoothed = true_range.rolling(window=45, min_periods=45).sum()
+        plus_di = 100 * (plus_dm.rolling(window=45, min_periods=45).sum() / atr_smoothed)
+        minus_di = 100 * (minus_dm.rolling(window=45, min_periods=45).sum() / atr_smoothed)
 
         dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0.0, pd.NA)) * 100
-        adx = dx.rolling(window=14, min_periods=14).mean()
+        adx = dx.rolling(window=45, min_periods=45).mean()
 
         ema12 = close.ewm(span=12, adjust=False).mean()
         ema26 = close.ewm(span=26, adjust=False).mean()

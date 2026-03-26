@@ -36,3 +36,5 @@ logs/paperbroker_20260324.log
 /logs
 __pycache__/backtesting.cpython-39.pyc
 /__pycache__
+/logs
+/logs
