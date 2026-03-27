@@ -560,7 +560,7 @@ class LiveTradingEngine:
             self.latest_indicators["rsi"] = indicators["rsi"]
             self.latest_indicators["adx"] = indicators["adx"]
             self.latest_indicators["atr"] = indicators["atr"]
-            min_profitable_spread = 0.5
+            min_profitable_spread = 1.0
             floored_dynamic_spread = max(
                 indicators["atr"] * self.spread_multiplier,
                 min_profitable_spread,
@@ -711,19 +711,24 @@ class LiveTradingEngine:
             adx_str = f"{adx_val:.2f}" if adx_val is not None else "N/A"
             spread_str = f"{spread_val:.4f}" if spread_val is not None else "N/A"
 
-            print("\n" + "=" * 52)
-            print("LiveTradingEngine Dashboard")
-            print("=" * 52)
-            print(f"Market Price:         {market_price}")
-            print(f"Inventory:            {inventory_str}")
-            print(f"Equity:               {self.current_equity:,.0f} VND")
-            print(f"PnL:                  {pnl:,.0f} VND")
-            print(f"Total Trades:         {self.total_trades_executed}")
-            print(f"State Heals:          {self.state_heal_count}")
-            print(f"RSI(45):              {rsi_str}")
-            print(f"ADX(45):              {adx_str}")
-            print(f"Dynamic Spread Width: {spread_str}")
-            print("=" * 52)
+            dashboard_str = "\n".join(
+                [
+                    "=" * 52,
+                    "LiveTradingEngine Dashboard",
+                    "=" * 52,
+                    f"Market Price:         {market_price}",
+                    f"Inventory:            {inventory_str}",
+                    f"Equity:               {self.current_equity:,.0f} VND",
+                    f"PnL:                  {pnl:,.0f} VND",
+                    f"Total Trades:         {self.total_trades_executed}",
+                    f"State Heals:          {self.state_heal_count}",
+                    f"RSI(45):              {rsi_str}",
+                    f"ADX(45):              {adx_str}",
+                    f"Dynamic Spread Width: {spread_str}",
+                    "=" * 52,
+                ]
+            )
+            self._write_log(dashboard_str, is_dashboard=True)
 
     def _extract_latest_price(self, quote_snapshot: Any) -> Optional[float]:
         if quote_snapshot is None:
@@ -812,6 +817,20 @@ class LiveTradingEngine:
             return "N/A"
         return f"{value:.{digits}f}"
 
+    def _write_log(self, message: str, is_dashboard: bool = False) -> None:
+        ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        formatted_msg = f"[{ts}] {message}"
+        print(formatted_msg)
+
+        project_dir = os.path.dirname(os.path.abspath(__file__))
+        log_dir = os.path.join(project_dir, "deliverables", "Gemini Context")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "running_log.txt")
+
+        suffix = "\n\n" if is_dashboard else "\n"
+        with open(log_path, "a", encoding="utf-8") as log_file:
+            log_file.write(formatted_msg + suffix)
+
     def _log_exec_limit_event(
         self,
         action: str,
@@ -819,7 +838,7 @@ class LiveTradingEngine:
         target_price: float,
         market_price: Optional[float],
     ) -> None:
-        print(
+        self._write_log(
             f"[EXEC] Action: {action} {side} Limit | "
             f"Target Px: {target_price:.2f} | "
             f"Mkt Px: {self._fmt_optional_float(market_price, 2)} | "
@@ -830,7 +849,7 @@ class LiveTradingEngine:
         )
 
     def _log_flush_event(self, reason: str, side: str, qty: int) -> None:
-        print(
+        self._write_log(
             f"[FLUSH] Market Order Triggered | Reason: {reason} | "
             f"Side: {side} | Qty: {qty} | "
             f"Inv: {self.inventory} | "
@@ -1561,7 +1580,7 @@ class LiveTradingEngine:
         if self.current_equity >= self.kill_switch_equity:
             return
 
-        print("CRITICAL: Global Kill Switch triggered. Equity below 400,000,000 VND.")
+        self._write_log("CRITICAL: Global Kill Switch triggered. Equity below 400,000,000 VND.")
 
         self.trading_halted = True
         self._cancel_all_resting_orders()
@@ -1599,10 +1618,15 @@ class LiveTradingEngine:
         if points_against < self.stop_loss_points:
             return
 
-        print("\n" + "!" * 52)
-        print(f"STOP LOSS TRIGGERED: Position down {points_against:.1f} pts")
-        print(f"Flushing {abs(self.inventory)} contracts to prevent tail risk.")
-        print("!" * 52 + "\n")
+        stop_loss_msg = "\n".join(
+            [
+                "!" * 52,
+                f"STOP LOSS TRIGGERED: Position down {points_against:.1f} pts",
+                f"Flushing {abs(self.inventory)} contracts to prevent tail risk.",
+                "!" * 52,
+            ]
+        )
+        self._write_log(stop_loss_msg)
 
         self._cancel_all_resting_orders()
         side_to_close = "SELL" if self.inventory > 0 else "BUY"
