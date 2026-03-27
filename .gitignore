@@ -38,3 +38,5 @@ __pycache__/backtesting.cpython-39.pyc
 /__pycache__
 /logs
 /logs
+deliverables/Gemini Context/running_log.txt
+logs/client_fix_messages/FIX.4.4-9629235d865343419b0dc388bbb34960-SERVER.session
