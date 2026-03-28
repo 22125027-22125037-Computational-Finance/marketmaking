@@ -560,7 +560,7 @@ class LiveTradingEngine:
             self.latest_indicators["rsi"] = indicators["rsi"]
             self.latest_indicators["adx"] = indicators["adx"]
             self.latest_indicators["atr"] = indicators["atr"]
-            min_profitable_spread = 1.0
+            min_profitable_spread = 0.5
             floored_dynamic_spread = max(
                 indicators["atr"] * self.spread_multiplier,
                 min_profitable_spread,
@@ -722,8 +722,8 @@ class LiveTradingEngine:
                     f"PnL:                  {pnl:,.0f} VND",
                     f"Total Trades:         {self.total_trades_executed}",
                     f"State Heals:          {self.state_heal_count}",
-                    f"RSI(45):              {rsi_str}",
-                    f"ADX(45):              {adx_str}",
+                    f"RSI(30):              {rsi_str}",
+                    f"ADX(30):              {adx_str}",
                     f"Dynamic Spread Width: {spread_str}",
                     "=" * 52,
                 ]
@@ -760,8 +760,8 @@ class LiveTradingEngine:
 
         gain = delta.clip(lower=0.0)
         loss = -delta.clip(upper=0.0)
-        avg_gain = gain.rolling(window=45, min_periods=45).mean()
-        avg_loss = loss.rolling(window=45, min_periods=45).mean()
+        avg_gain = gain.rolling(window=30, min_periods=30).mean()
+        avg_loss = loss.rolling(window=30, min_periods=30).mean()
         rs = avg_gain / avg_loss.replace(0.0, pd.NA)
         rsi = 100 - (100 / (1 + rs))
 
@@ -778,7 +778,7 @@ class LiveTradingEngine:
             axis=1,
         )
         true_range = tr_components.max(axis=1)
-        atr = true_range.rolling(window=45, min_periods=45).mean()
+        atr = true_range.rolling(window=30, min_periods=30).mean()
 
         up_move = high.diff()
         down_move = -low.diff()
@@ -786,12 +786,12 @@ class LiveTradingEngine:
         plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
         minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
 
-        atr_smoothed = true_range.rolling(window=45, min_periods=45).sum()
-        plus_di = 100 * (plus_dm.rolling(window=45, min_periods=45).sum() / atr_smoothed)
-        minus_di = 100 * (minus_dm.rolling(window=45, min_periods=45).sum() / atr_smoothed)
+        atr_smoothed = true_range.rolling(window=30, min_periods=30).sum()
+        plus_di = 100 * (plus_dm.rolling(window=30, min_periods=30).sum() / atr_smoothed)
+        minus_di = 100 * (minus_dm.rolling(window=30, min_periods=30).sum() / atr_smoothed)
 
         dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0.0, pd.NA)) * 100
-        adx = dx.rolling(window=45, min_periods=45).mean()
+        adx = dx.rolling(window=30, min_periods=30).mean()
 
         ema12 = close.ewm(span=12, adjust=False).mean()
         ema26 = close.ewm(span=26, adjust=False).mean()
