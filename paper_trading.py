@@ -560,7 +560,7 @@ class LiveTradingEngine:
             self.latest_indicators["rsi"] = indicators["rsi"]
             self.latest_indicators["adx"] = indicators["adx"]
             self.latest_indicators["atr"] = indicators["atr"]
-            min_profitable_spread = 0.5
+            min_profitable_spread = 0.8
             floored_dynamic_spread = max(
                 indicators["atr"] * self.spread_multiplier,
                 min_profitable_spread,
