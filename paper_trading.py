@@ -40,6 +40,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
 from backtesting import PredictiveRSIMarketMaker
@@ -105,7 +106,10 @@ class LiveTradingEngine:
         self.stop_loss_points = float(os.getenv("PAPERBROKER_STOP_LOSS_POINTS", "10.0"))
         self.trading_halted = False
 
-        self.fee_per_contract = 40_000.0  # 0.4 points * 100,000 multiplier
+        #self.fee_per_contract = 40_000.0  # 0.4 points * 100,000 multiplier
+        #temporary disable fee to better visualize PnL in paper trading. Remember to re-enable for realistic backtesting.
+        self.fee_per_contract = 0.0
+
 
         self.inventory = 0
         self.avg_entry_price: Optional[float] = None
@@ -187,6 +191,12 @@ class LiveTradingEngine:
             not in {"0", "false", "no"}
         )
         self._printed_trade_api_capabilities = False
+        self._log_header_written = False
+
+        self.analytics_timestamps: List[datetime] = []
+        self.analytics_equity: List[float] = []
+        self.analytics_inventory: List[int] = []
+        self.analytics_price: List[float] = []
 
         self.client = self._build_fix_client()
         self.market_data_client = self._build_kafka_client()
@@ -296,6 +306,7 @@ class LiveTradingEngine:
 
     async def start_async(self) -> None:
         """Run FIX + Kafka + dashboard in asyncio mode."""
+        print(f"Run started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("Starting LiveTradingEngine (async)...")
 
         await self._call_client_method_async(self.client, ("connect", "start"))
@@ -656,11 +667,107 @@ class LiveTradingEngine:
 
             true_equity = self._pull_equity_from_portfolio()
             if true_equity is not None:
-                self.current_equity = true_equity
+                self._rebase_equity(true_equity)
                 print(f"Reconciled Equity:       {self.current_equity:,.0f} VND")
+                self._record_analytics_snapshot()
+                self._save_analytics_charts()
             else:
                 print("Reconciled Equity:       FAILED TO PULL")
             print("-" * 40 + "\n")
+
+    def _rebase_equity(self, true_equity: float) -> None:
+        """Align internal PnL baseline to the latest broker-reported equity."""
+        unrealized = 0.0
+        if self.inventory != 0 and self.avg_entry_price is not None and self.last_price is not None:
+            if self.inventory > 0:
+                unrealized = (
+                    (self.last_price - self.avg_entry_price)
+                    * abs(self.inventory)
+                    * self.contract_multiplier
+                )
+            else:
+                unrealized = (
+                    (self.avg_entry_price - self.last_price)
+                    * abs(self.inventory)
+                    * self.contract_multiplier
+                )
+
+        self.initial_capital = float(true_equity) - unrealized
+        self.realized_pnl = 0.0
+        self.current_equity = float(true_equity)
+
+    def _record_analytics_snapshot(self) -> None:
+        if self.last_price is None:
+            return
+
+        self.analytics_timestamps.append(datetime.now())
+        self.analytics_equity.append(float(self.current_equity))
+        self.analytics_inventory.append(int(self.inventory))
+        self.analytics_price.append(float(self.last_price))
+
+    def _save_analytics_charts(self) -> None:
+        if not self.analytics_timestamps:
+            return
+
+        result_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "result",
+            "papertrading",
+        )
+        os.makedirs(result_dir, exist_ok=True)
+
+        time_index = pd.to_datetime(self.analytics_timestamps)
+        equity_series = pd.Series(self.analytics_equity, index=time_index)
+        price_series = pd.Series(self.analytics_price, index=time_index)
+        inventory_series = pd.Series(self.analytics_inventory, index=time_index)
+
+        hpr = equity_series / float(self.initial_capital) if self.initial_capital else equity_series
+        rolling_max = equity_series.cummax()
+        drawdown = (equity_series - rolling_max) / rolling_max.replace(0.0, pd.NA)
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(hpr.index, hpr.values, color="black", label="HPR")
+        plt.title("Holding Period Return (Paper Trading)")
+        plt.xlabel("Time")
+        plt.ylabel("HPR")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(result_dir, "hpr.svg"), dpi=300)
+        plt.close()
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(drawdown.index, drawdown.values, color="black", label="Drawdown")
+        plt.title("Drawdown (Paper Trading)")
+        plt.xlabel("Time")
+        plt.ylabel("Drawdown")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(result_dir, "drawdown.svg"), dpi=300)
+        plt.close()
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(inventory_series.index, inventory_series.values, color="black", label="Inventory")
+        plt.title("Inventory Over Time (Paper Trading)")
+        plt.xlabel("Time")
+        plt.ylabel("Contracts")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(result_dir, "inventory.svg"), dpi=300)
+        plt.close()
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(price_series.index, price_series.values, color="black", label="Price")
+        plt.title("Price Over Time (Paper Trading)")
+        plt.xlabel("Time")
+        plt.ylabel("Price")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(result_dir, "price.svg"), dpi=300)
+        plt.close()
 
     async def _eod_liquidation_loop(self) -> None:
         """Hard-stop risk control: flatten all inventory before 14:30 (GMT+7)."""
@@ -829,6 +936,10 @@ class LiveTradingEngine:
 
         suffix = "\n\n" if is_dashboard else "\n"
         with open(log_path, "a", encoding="utf-8") as log_file:
+            if not self._log_header_written:
+                header_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                log_file.write(f"\n===== Run started at {header_ts} =====\n")
+                self._log_header_written = True
             log_file.write(formatted_msg + suffix)
 
     def _log_exec_limit_event(
