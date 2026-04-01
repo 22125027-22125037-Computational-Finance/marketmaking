@@ -197,6 +197,15 @@ class LiveTradingEngine:
         self.analytics_equity: List[float] = []
         self.analytics_inventory: List[int] = []
         self.analytics_price: List[float] = []
+        self.analytics_elapsed_seconds: List[float] = []
+        self._analytics_last_wall_ts: Optional[float] = None
+        self.analytics_history_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "result",
+            "papertrading",
+            "analytics_history.csv",
+        )
+        self._load_analytics_history()
 
         self.client = self._build_fix_client()
         self.market_data_client = self._build_kafka_client()
@@ -700,10 +709,26 @@ class LiveTradingEngine:
         if self.last_price is None:
             return
 
-        self.analytics_timestamps.append(datetime.now())
+        now = datetime.now()
+        self.analytics_timestamps.append(now)
         self.analytics_equity.append(float(self.current_equity))
         self.analytics_inventory.append(int(self.inventory))
         self.analytics_price.append(float(self.last_price))
+
+        if self._analytics_last_wall_ts is None:
+            elapsed = (
+                self.analytics_elapsed_seconds[-1] if self.analytics_elapsed_seconds else 0.0
+            )
+        else:
+            delta = max(0.0, time.time() - self._analytics_last_wall_ts)
+            elapsed = (
+                (self.analytics_elapsed_seconds[-1] if self.analytics_elapsed_seconds else 0.0)
+                + delta
+            )
+
+        self.analytics_elapsed_seconds.append(float(elapsed))
+        self._analytics_last_wall_ts = time.time()
+        self._append_analytics_snapshot(now, elapsed)
 
     def _save_analytics_charts(self) -> None:
         if not self.analytics_timestamps:
@@ -716,10 +741,11 @@ class LiveTradingEngine:
         )
         os.makedirs(result_dir, exist_ok=True)
 
-        time_index = pd.to_datetime(self.analytics_timestamps)
-        equity_series = pd.Series(self.analytics_equity, index=time_index)
-        price_series = pd.Series(self.analytics_price, index=time_index)
-        inventory_series = pd.Series(self.analytics_inventory, index=time_index)
+        elapsed_index = pd.Series(self.analytics_elapsed_seconds, dtype="float64")
+
+        equity_series = pd.Series(self.analytics_equity, index=elapsed_index)
+        price_series = pd.Series(self.analytics_price, index=elapsed_index)
+        inventory_series = pd.Series(self.analytics_inventory, index=elapsed_index)
 
         hpr = equity_series / float(self.initial_capital) if self.initial_capital else equity_series
         rolling_max = equity_series.cummax()
@@ -728,7 +754,7 @@ class LiveTradingEngine:
         plt.figure(figsize=(10, 6))
         plt.plot(hpr.index, hpr.values, color="black", label="HPR")
         plt.title("Holding Period Return (Paper Trading)")
-        plt.xlabel("Time")
+        plt.xlabel("Elapsed Trading Seconds")
         plt.ylabel("HPR")
         plt.grid(True)
         plt.legend()
@@ -739,7 +765,7 @@ class LiveTradingEngine:
         plt.figure(figsize=(10, 6))
         plt.plot(drawdown.index, drawdown.values, color="black", label="Drawdown")
         plt.title("Drawdown (Paper Trading)")
-        plt.xlabel("Time")
+        plt.xlabel("Elapsed Trading Seconds")
         plt.ylabel("Drawdown")
         plt.grid(True)
         plt.legend()
@@ -750,7 +776,7 @@ class LiveTradingEngine:
         plt.figure(figsize=(10, 6))
         plt.plot(inventory_series.index, inventory_series.values, color="black", label="Inventory")
         plt.title("Inventory Over Time (Paper Trading)")
-        plt.xlabel("Time")
+        plt.xlabel("Elapsed Trading Seconds")
         plt.ylabel("Contracts")
         plt.grid(True)
         plt.legend()
@@ -761,7 +787,7 @@ class LiveTradingEngine:
         plt.figure(figsize=(10, 6))
         plt.plot(price_series.index, price_series.values, color="black", label="Price")
         plt.title("Price Over Time (Paper Trading)")
-        plt.xlabel("Time")
+        plt.xlabel("Elapsed Trading Seconds")
         plt.ylabel("Price")
         plt.grid(True)
         plt.legend()
@@ -792,6 +818,70 @@ class LiveTradingEngine:
                 self._cancel_all_resting_orders()
                 self._flatten_inventory_market(reason="eod_liquidation")
                 break
+
+            if now_local >= liquidation_end:
+                print("\n" + "#" * 90)
+                print("EOD HARD STOP: trading session closed (>= 14:30:00 GMT+7)")
+                print("Halting trading and stopping all loops.")
+                print("#" * 90 + "\n")
+                self.trading_halted = True
+                self._cancel_all_resting_orders()
+                self._flatten_inventory_market(reason="eod_liquidation")
+                break
+
+    def _load_analytics_history(self) -> None:
+        if not os.path.exists(self.analytics_history_path):
+            return
+
+        try:
+            history = pd.read_csv(self.analytics_history_path)
+        except Exception as exc:
+            print(f"Failed to load analytics history: {exc}")
+            return
+
+        required_cols = {"timestamp", "equity", "inventory", "price", "elapsed_seconds"}
+        if not required_cols.issubset(set(history.columns)):
+            print("Analytics history missing required columns. Starting fresh in-memory.")
+            return
+
+        try:
+            history = history.dropna(subset=["timestamp"]).copy()
+            history["timestamp"] = pd.to_datetime(history["timestamp"], errors="coerce")
+            history = history.dropna(subset=["timestamp"]).copy()
+        except Exception:
+            return
+
+        self.analytics_timestamps = history["timestamp"].tolist()
+        self.analytics_equity = history["equity"].astype(float).tolist()
+        self.analytics_inventory = history["inventory"].astype(int).tolist()
+        self.analytics_price = history["price"].astype(float).tolist()
+        self.analytics_elapsed_seconds = history["elapsed_seconds"].astype(float).tolist()
+        self._analytics_last_wall_ts = None
+
+    def _append_analytics_snapshot(self, ts: datetime, elapsed_seconds: float) -> None:
+        record = pd.DataFrame(
+            [
+                {
+                    "timestamp": ts.isoformat(),
+                    "equity": float(self.current_equity),
+                    "inventory": int(self.inventory),
+                    "price": float(self.last_price) if self.last_price is not None else None,
+                    "elapsed_seconds": float(elapsed_seconds),
+                }
+            ]
+        )
+
+        os.makedirs(os.path.dirname(self.analytics_history_path), exist_ok=True)
+        write_header = not os.path.exists(self.analytics_history_path)
+        try:
+            record.to_csv(
+                self.analytics_history_path,
+                mode="a",
+                header=write_header,
+                index=False,
+            )
+        except Exception as exc:
+            print(f"Failed to append analytics history: {exc}")
 
     async def print_dashboard_loop(self) -> None:
         """Print live status block every 10 seconds until trading is halted."""
