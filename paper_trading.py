@@ -199,13 +199,14 @@ class LiveTradingEngine:
             not in {"0", "false", "no"}
         )
         self._printed_trade_api_capabilities = False
-        self._log_header_written = False
 
         self.analytics_timestamps: List[datetime] = []
         self.analytics_equity: List[float] = []
         self.analytics_inventory: List[int] = []
         self.analytics_price: List[float] = []
         self.analytics_elapsed_seconds: List[float] = []
+        self.analytics_rsi: List[Optional[float]] = []
+        self.analytics_adx: List[Optional[float]] = []
         self._analytics_last_wall_ts: Optional[float] = None
         self.analytics_history_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
@@ -598,7 +599,7 @@ class LiveTradingEngine:
             self.latest_indicators["rsi"] = indicators["rsi"]
             self.latest_indicators["adx"] = indicators["adx"]
             self.latest_indicators["atr"] = indicators["atr"]
-            min_profitable_spread = 0.8
+            min_profitable_spread = 0.9
             floored_dynamic_spread = max(
                 indicators["atr"] * self.spread_multiplier,
                 min_profitable_spread,
@@ -733,6 +734,10 @@ class LiveTradingEngine:
         self.analytics_equity.append(float(self.current_equity))
         self.analytics_inventory.append(int(self.inventory))
         self.analytics_price.append(float(self.last_price))
+        rsi_value = self.latest_indicators.get("rsi")
+        adx_value = self.latest_indicators.get("adx")
+        self.analytics_rsi.append(float(rsi_value) if rsi_value is not None else None)
+        self.analytics_adx.append(float(adx_value) if adx_value is not None else None)
 
         if self._analytics_last_wall_ts is None:
             elapsed = (
@@ -747,7 +752,12 @@ class LiveTradingEngine:
 
         self.analytics_elapsed_seconds.append(float(elapsed))
         self._analytics_last_wall_ts = time.time()
-        self._append_analytics_snapshot(now, elapsed)
+        self._append_analytics_snapshot(
+            ts=now,
+            elapsed_seconds=elapsed,
+            rsi=self.analytics_rsi[-1],
+            adx=self.analytics_adx[-1],
+        )
 
     def _save_analytics_charts(self) -> None:
         if not self.analytics_timestamps:
@@ -823,9 +833,11 @@ class LiveTradingEngine:
         plt.close()
 
     async def _eod_liquidation_loop(self) -> None:
-        """Hard-stop risk control: flatten all inventory before 14:30 (GMT+7)."""
-        liquidation_start = dt_time(hour=14, minute=29, second=30)
-        liquidation_end = dt_time(hour=14, minute=30, second=0)
+        """Hard-stop risk control at morning and afternoon session ends (GMT+7)."""
+        morning_liquidation_start = dt_time(hour=11, minute=29, second=30)
+        morning_liquidation_end = dt_time(hour=11, minute=30, second=0)
+        afternoon_liquidation_start = dt_time(hour=14, minute=29, second=30)
+        afternoon_liquidation_end = dt_time(hour=14, minute=30, second=0)
         vn_tz = ZoneInfo("Asia/Ho_Chi_Minh")
 
         while True:
@@ -835,7 +847,28 @@ class LiveTradingEngine:
                 break
 
             now_local = datetime.now(vn_tz).time()
-            if liquidation_start <= now_local < liquidation_end:
+            if morning_liquidation_start <= now_local < morning_liquidation_end:
+                print("\n" + "#" * 90)
+                print("CRITICAL MORNING SESSION LIQUIDATION TRIGGERED (11:29:30-11:30:00 GMT+7)")
+                print("Force-halting trading, canceling all resting orders, flattening inventory now.")
+                print("#" * 90 + "\n")
+
+                self.trading_halted = True
+                self._cancel_all_resting_orders()
+                self._flatten_inventory_market(reason="morning_liquidation")
+                break
+
+            if now_local >= morning_liquidation_end and now_local < afternoon_liquidation_start:
+                print("\n" + "#" * 90)
+                print("MORNING SESSION HARD STOP: trading paused after 11:30:00 GMT+7")
+                print("Halting trading and stopping all loops.")
+                print("#" * 90 + "\n")
+                self.trading_halted = True
+                self._cancel_all_resting_orders()
+                self._flatten_inventory_market(reason="morning_liquidation")
+                break
+
+            if afternoon_liquidation_start <= now_local < afternoon_liquidation_end:
                 print("\n" + "#" * 90)
                 print("CRITICAL EOD LIQUIDATION TRIGGERED (14:29:30-14:30:00 GMT+7)")
                 print("Force-halting trading, canceling all resting orders, flattening inventory now.")
@@ -846,7 +879,7 @@ class LiveTradingEngine:
                 self._flatten_inventory_market(reason="eod_liquidation")
                 break
 
-            if now_local >= liquidation_end:
+            if now_local >= afternoon_liquidation_end:
                 print("\n" + "#" * 90)
                 print("EOD HARD STOP: trading session closed (>= 14:30:00 GMT+7)")
                 print("Halting trading and stopping all loops.")
@@ -900,9 +933,42 @@ class LiveTradingEngine:
         self.analytics_inventory = history["inventory"].astype(int).tolist()
         self.analytics_price = history["price"].astype(float).tolist()
         self.analytics_elapsed_seconds = history["elapsed_seconds"].astype(float).tolist()
+        if "rsi" in history.columns:
+            rsi_series = pd.to_numeric(history["rsi"], errors="coerce")
+            self.analytics_rsi = [float(value) if pd.notna(value) else None for value in rsi_series]
+        else:
+            self.analytics_rsi = [None] * len(self.analytics_timestamps)
+
+        if "adx" in history.columns:
+            adx_series = pd.to_numeric(history["adx"], errors="coerce")
+            self.analytics_adx = [float(value) if pd.notna(value) else None for value in adx_series]
+        else:
+            self.analytics_adx = [None] * len(self.analytics_timestamps)
         self._analytics_last_wall_ts = None
 
-    def _append_analytics_snapshot(self, ts: datetime, elapsed_seconds: float) -> None:
+    def _append_analytics_snapshot(
+        self,
+        ts: datetime,
+        elapsed_seconds: float,
+        rsi: Optional[float],
+        adx: Optional[float],
+    ) -> None:
+        # One-time schema migration for older files that don't have rsi/adx columns yet.
+        if os.path.exists(self.analytics_history_path):
+            try:
+                existing_header = pd.read_csv(self.analytics_history_path, nrows=0)
+                has_rsi = "rsi" in existing_header.columns
+                has_adx = "adx" in existing_header.columns
+                if not (has_rsi and has_adx):
+                    existing_history = pd.read_csv(self.analytics_history_path)
+                    if "rsi" not in existing_history.columns:
+                        existing_history["rsi"] = pd.NA
+                    if "adx" not in existing_history.columns:
+                        existing_history["adx"] = pd.NA
+                    existing_history.to_csv(self.analytics_history_path, index=False)
+            except Exception as exc:
+                print(f"Failed to migrate analytics history schema: {exc}")
+
         record = pd.DataFrame(
             [
                 {
@@ -911,6 +977,8 @@ class LiveTradingEngine:
                     "inventory": int(self.inventory),
                     "price": float(self.last_price) if self.last_price is not None else None,
                     "elapsed_seconds": float(elapsed_seconds),
+                    "rsi": float(rsi) if rsi is not None else None,
+                    "adx": float(adx) if adx is not None else None,
                 }
             ]
         )
@@ -1059,22 +1127,10 @@ class LiveTradingEngine:
         return f"{value:.{digits}f}"
 
     def _write_log(self, message: str, is_dashboard: bool = False) -> None:
+        _ = is_dashboard
         ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
         formatted_msg = f"[{ts}] {message}"
         print(formatted_msg)
-
-        project_dir = os.path.dirname(os.path.abspath(__file__))
-        log_dir = os.path.join(project_dir, "deliverables", "Gemini Context")
-        os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, "running_log.txt")
-
-        suffix = "\n\n" if is_dashboard else "\n"
-        with open(log_path, "a", encoding="utf-8") as log_file:
-            if not self._log_header_written:
-                header_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                log_file.write(f"\n===== Run started at {header_ts} =====\n")
-                self._log_header_written = True
-            log_file.write(formatted_msg + suffix)
 
     def _log_exec_limit_event(
         self,
