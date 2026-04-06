@@ -70,3 +70,8 @@ If the Python process is killed ungracefully, resting limit orders remain live o
 
 ## Conclusion
 The `LiveTradingEngine` successfully bridges the gap between predictive quantitative theory and production-grade execution software. By isolating latency-sensitive components, actively enforcing margin-compliant execution paths, and wrapping the alpha strategy in a highly defensive FIX state machine, the system is fully hardened against race conditions and ready for continuous operation during HOSE derivative trading hours.
+
+## Questions to raise in persentation:
+1. The dynamic spread width keeps being the minimum profitable width
+2. The equity keeps getting delayed and needs reconcilation --> This greately raise the concern if the app is making money by luck or by a good algorithm
+3. Dạ cho em hỏi là trading fee là 40.000 VND đúng ko ạ, tại em tính local equity vs lâu lâu em fetch equity bằng REST request thì thấy lệch nhau hơi nhiều mà lúc em để equity còn 0 thì thấy 2 cái equity lệch nhau rất ít ạ

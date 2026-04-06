@@ -105,6 +105,8 @@ class LiveTradingEngine:
         self.kill_switch_equity = 400_000_000.0
         self.stop_loss_points = float(os.getenv("PAPERBROKER_STOP_LOSS_POINTS", "10.0"))
         self.trading_halted = False
+        self.midday_break_active = False
+        self._last_morning_liquidation_date: Optional[datetime.date] = None
 
         #self.fee_per_contract = 40_000.0  # 0.4 points * 100,000 multiplier
         #temporary disable fee to better visualize PnL in paper trading. Remember to re-enable for realistic backtesting.
@@ -591,6 +593,9 @@ class LiveTradingEngine:
             if self.trading_halted:
                 break
 
+            if self.midday_break_active or self._is_midday_break():
+                continue
+
             if len(self.prices) < self.min_points_for_signals:
                 continue
 
@@ -846,9 +851,10 @@ class LiveTradingEngine:
         plt.close()
 
     async def _eod_liquidation_loop(self) -> None:
-        """Hard-stop risk control at morning and afternoon session ends (GMT+7)."""
+        """Risk controls for morning break and end-of-day boundaries (GMT+7)."""
         morning_liquidation_start = dt_time(hour=11, minute=29, second=30)
         morning_liquidation_end = dt_time(hour=11, minute=30, second=0)
+        afternoon_session_start = dt_time(hour=13, minute=0, second=0)
         afternoon_liquidation_start = dt_time(hour=14, minute=29, second=30)
         afternoon_liquidation_end = dt_time(hour=14, minute=30, second=0)
         vn_tz = ZoneInfo("Asia/Ho_Chi_Minh")
@@ -859,29 +865,43 @@ class LiveTradingEngine:
             if self.trading_halted:
                 break
 
-            now_local = datetime.now(vn_tz).time()
-            if morning_liquidation_start <= now_local < morning_liquidation_end:
+            now_dt = datetime.now(vn_tz)
+            now_local = now_dt.time()
+            now_date = now_dt.date()
+            if (
+                morning_liquidation_start <= now_local < morning_liquidation_end
+                and self._last_morning_liquidation_date != now_date
+            ):
                 print("\n" + "#" * 90)
                 print("CRITICAL MORNING SESSION LIQUIDATION TRIGGERED (11:29:30-11:30:00 GMT+7)")
-                print("Force-halting trading, canceling all resting orders, flattening inventory now.")
+                print("Canceling all resting orders and flattening inventory before midday break.")
                 print("#" * 90 + "\n")
 
-                self.trading_halted = True
+                self._last_morning_liquidation_date = now_date
+                self.midday_break_active = True
                 self._mark_analytics_event("morning_liquidation")
                 self._cancel_all_resting_orders()
                 self._flatten_inventory_market(reason="morning_liquidation")
-                break
+                continue
 
-            if now_local >= morning_liquidation_end and now_local < afternoon_liquidation_start:
+            if morning_liquidation_end <= now_local < afternoon_session_start:
+                if not self.midday_break_active:
+                    print("\n" + "#" * 90)
+                    print("MIDDAY BREAK ACTIVE: trading paused (11:30:00-13:00:00 GMT+7)")
+                    print("Canceling resting orders and waiting for afternoon auto-resume.")
+                    print("#" * 90 + "\n")
+                    self.midday_break_active = True
+                    self._mark_analytics_event("morning_liquidation")
+                    self._cancel_all_resting_orders()
+                    self._flatten_inventory_market(reason="morning_liquidation")
+                continue
+
+            if now_local >= afternoon_session_start and self.midday_break_active:
                 print("\n" + "#" * 90)
-                print("MORNING SESSION HARD STOP: trading paused after 11:30:00 GMT+7")
-                print("Halting trading and stopping all loops.")
+                print("AFTERNOON SESSION RESUMED: trading active again from 13:00:00 GMT+7")
+                print("Restarting quote placement and strategy loops automatically.")
                 print("#" * 90 + "\n")
-                self.trading_halted = True
-                self._mark_analytics_event("morning_liquidation")
-                self._cancel_all_resting_orders()
-                self._flatten_inventory_market(reason="morning_liquidation")
-                break
+                self.midday_break_active = False
 
             if afternoon_liquidation_start <= now_local < afternoon_liquidation_end:
                 print("\n" + "#" * 90)
@@ -1189,6 +1209,16 @@ class LiveTradingEngine:
         ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
         formatted_msg = f"[{ts}] {message}"
         print(formatted_msg)
+
+    @staticmethod
+    def _vn_now() -> datetime:
+        return datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
+
+    def _is_midday_break(self) -> bool:
+        now_local = self._vn_now().time()
+        return dt_time(hour=11, minute=30, second=0) <= now_local < dt_time(
+            hour=13, minute=0, second=0
+        )
 
     def _log_exec_limit_event(
         self,
