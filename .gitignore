@@ -2,7 +2,6 @@ __pycache__
 __init__.py
 .DS_Store
 .env
-*.csv
 venv/
 deliverables/backtest/log.txt
 deliverables/backtest/original.txt
@@ -40,3 +39,7 @@ __pycache__/backtesting.cpython-39.pyc
 /logs
 deliverables/Gemini Context/running_log.txt
 logs/client_fix_messages/FIX.4.4-9629235d865343419b0dc388bbb34960-SERVER.session
+data/is/teacher's data/VN30F1M_data.csv
+data/is/teacher's data/VN30F2M_data.csv
+data/os/VN30F1M_data.csv
+data/os/VN30F2M_data.csv
