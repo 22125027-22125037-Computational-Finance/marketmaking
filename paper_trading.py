@@ -121,6 +121,7 @@ class LiveTradingEngine:
             "rsi": None,
             "adx": None,
             "atr": None,
+            "raw_atr_spread": None,
             "dynamic_spread": None,
         }
 
@@ -199,6 +200,7 @@ class LiveTradingEngine:
             not in {"0", "false", "no"}
         )
         self._printed_trade_api_capabilities = False
+        self._last_analytics_event_reason: Optional[str] = None
 
         self.analytics_timestamps: List[datetime] = []
         self.analytics_equity: List[float] = []
@@ -599,11 +601,20 @@ class LiveTradingEngine:
             self.latest_indicators["rsi"] = indicators["rsi"]
             self.latest_indicators["adx"] = indicators["adx"]
             self.latest_indicators["atr"] = indicators["atr"]
-            min_profitable_spread = 0.9
-            floored_dynamic_spread = max(
-                indicators["atr"] * self.spread_multiplier,
-                min_profitable_spread,
+
+            raw_atr_spread = indicators["atr"] * self.spread_multiplier
+            min_profitable_spread = 0.8
+            fee_floor_spread = (
+                (2.0 * self.fee_per_contract) / self.contract_multiplier
+                if self.contract_multiplier > 0
+                else 0.0
             )
+            effective_floor = max(min_profitable_spread, fee_floor_spread)
+            floored_dynamic_spread = max(
+                raw_atr_spread,
+                effective_floor,
+            )
+            self.latest_indicators["raw_atr_spread"] = raw_atr_spread
             self.latest_indicators["dynamic_spread"] = floored_dynamic_spread
 
             # Signal-driven reversal flattening: only flush when RSI says regime flipped.
@@ -619,9 +630,10 @@ class LiveTradingEngine:
                     continue
 
                 print(
-                    f"Signal reversal flush: covering short inventory due to RSI {rsi_value:.2f} < 20."
+                    f"Signal reversal flush: covering short inventory due to RSI {rsi_value:.2f} < 30."
                 )
                 self._cancel_all_resting_orders()
+                self._mark_analytics_event("reversal_flatten")
                 self._place_market_order(
                     side="BUY",
                     qty=abs(self.inventory),
@@ -634,9 +646,10 @@ class LiveTradingEngine:
                     continue
 
                 print(
-                    f"Signal reversal flush: dumping long inventory due to RSI {rsi_value:.2f} > 80."
+                    f"Signal reversal flush: dumping long inventory due to RSI {rsi_value:.2f} > 70."
                 )
                 self._cancel_all_resting_orders()
+                self._mark_analytics_event("reversal_flatten")
                 self._place_market_order(
                     side="SELL",
                     qty=abs(self.inventory),
@@ -854,6 +867,7 @@ class LiveTradingEngine:
                 print("#" * 90 + "\n")
 
                 self.trading_halted = True
+                self._mark_analytics_event("morning_liquidation")
                 self._cancel_all_resting_orders()
                 self._flatten_inventory_market(reason="morning_liquidation")
                 break
@@ -864,6 +878,7 @@ class LiveTradingEngine:
                 print("Halting trading and stopping all loops.")
                 print("#" * 90 + "\n")
                 self.trading_halted = True
+                self._mark_analytics_event("morning_liquidation")
                 self._cancel_all_resting_orders()
                 self._flatten_inventory_market(reason="morning_liquidation")
                 break
@@ -875,6 +890,7 @@ class LiveTradingEngine:
                 print("#" * 90 + "\n")
 
                 self.trading_halted = True
+                self._mark_analytics_event("eod_liquidation")
                 self._cancel_all_resting_orders()
                 self._flatten_inventory_market(reason="eod_liquidation")
                 break
@@ -885,6 +901,7 @@ class LiveTradingEngine:
                 print("Halting trading and stopping all loops.")
                 print("#" * 90 + "\n")
                 self.trading_halted = True
+                self._mark_analytics_event("eod_liquidation")
                 self._cancel_all_resting_orders()
                 self._flatten_inventory_market(reason="eod_liquidation")
                 break
@@ -953,21 +970,52 @@ class LiveTradingEngine:
         rsi: Optional[float],
         adx: Optional[float],
     ) -> None:
-        # One-time schema migration for older files that don't have rsi/adx columns yet.
+        event_reason = self._last_analytics_event_reason
+        self._last_analytics_event_reason = None
+
+        # One-time schema migration for older files that don't have newer analytics columns yet.
         if os.path.exists(self.analytics_history_path):
             try:
                 existing_header = pd.read_csv(self.analytics_history_path, nrows=0)
                 has_rsi = "rsi" in existing_header.columns
                 has_adx = "adx" in existing_header.columns
-                if not (has_rsi and has_adx):
+                has_loss_reason = "loss_reason" in existing_header.columns
+                has_is_stoploss = "is_stoploss" in existing_header.columns
+                has_is_kill_switch = "is_kill_switch" in existing_header.columns
+                has_is_reversal_flatten = "is_reversal_flatten" in existing_header.columns
+                has_is_eod_liquidation = "is_eod_liquidation" in existing_header.columns
+                if not (
+                    has_rsi
+                    and has_adx
+                    and has_loss_reason
+                    and has_is_stoploss
+                    and has_is_kill_switch
+                    and has_is_reversal_flatten
+                    and has_is_eod_liquidation
+                ):
                     existing_history = pd.read_csv(self.analytics_history_path)
                     if "rsi" not in existing_history.columns:
                         existing_history["rsi"] = pd.NA
                     if "adx" not in existing_history.columns:
                         existing_history["adx"] = pd.NA
+                    if "loss_reason" not in existing_history.columns:
+                        existing_history["loss_reason"] = pd.NA
+                    if "is_stoploss" not in existing_history.columns:
+                        existing_history["is_stoploss"] = 0
+                    if "is_kill_switch" not in existing_history.columns:
+                        existing_history["is_kill_switch"] = 0
+                    if "is_reversal_flatten" not in existing_history.columns:
+                        existing_history["is_reversal_flatten"] = 0
+                    if "is_eod_liquidation" not in existing_history.columns:
+                        existing_history["is_eod_liquidation"] = 0
                     existing_history.to_csv(self.analytics_history_path, index=False)
             except Exception as exc:
                 print(f"Failed to migrate analytics history schema: {exc}")
+
+        is_stoploss = 1 if event_reason == "stop_loss" else 0
+        is_kill_switch = 1 if event_reason == "kill_switch" else 0
+        is_reversal_flatten = 1 if event_reason == "reversal_flatten" else 0
+        is_eod_liquidation = 1 if event_reason in {"morning_liquidation", "eod_liquidation"} else 0
 
         record = pd.DataFrame(
             [
@@ -979,6 +1027,11 @@ class LiveTradingEngine:
                     "elapsed_seconds": float(elapsed_seconds),
                     "rsi": float(rsi) if rsi is not None else None,
                     "adx": float(adx) if adx is not None else None,
+                    "loss_reason": event_reason,
+                    "is_stoploss": is_stoploss,
+                    "is_kill_switch": is_kill_switch,
+                    "is_reversal_flatten": is_reversal_flatten,
+                    "is_eod_liquidation": is_eod_liquidation,
                 }
             ]
         )
@@ -1015,10 +1068,14 @@ class LiveTradingEngine:
             rsi_val = self.latest_indicators.get("rsi")
             adx_val = self.latest_indicators.get("adx")
             spread_val = self.latest_indicators.get("dynamic_spread")
+            raw_atr_spread_val = self.latest_indicators.get("raw_atr_spread")
 
             rsi_str = f"{rsi_val:.2f}" if rsi_val is not None else "N/A"
             adx_str = f"{adx_val:.2f}" if adx_val is not None else "N/A"
             spread_str = f"{spread_val:.4f}" if spread_val is not None else "N/A"
+            raw_atr_spread_str = (
+                f"{raw_atr_spread_val:.4f}" if raw_atr_spread_val is not None else "N/A"
+            )
 
             dashboard_str = "\n".join(
                 [
@@ -1033,6 +1090,7 @@ class LiveTradingEngine:
                     f"State Heals:          {self.state_heal_count}",
                     f"RSI(30):              {rsi_str}",
                     f"ADX(30):              {adx_str}",
+                    f"Raw ATR Spread:       {raw_atr_spread_str}",
                     f"Dynamic Spread Width: {spread_str}",
                     "=" * 52,
                 ]
@@ -1884,6 +1942,7 @@ class LiveTradingEngine:
         self._write_log("CRITICAL: Global Kill Switch triggered. Equity below 400,000,000 VND.")
 
         self.trading_halted = True
+        self._mark_analytics_event("kill_switch")
         self._cancel_all_resting_orders()
         self._flatten_inventory_market(reason="kill_switch")
 
@@ -1929,6 +1988,7 @@ class LiveTradingEngine:
         )
         self._write_log(stop_loss_msg)
 
+        self._mark_analytics_event("stop_loss")
         self._cancel_all_resting_orders()
         side_to_close = "SELL" if self.inventory > 0 else "BUY"
         self._place_market_order(
@@ -1936,6 +1996,9 @@ class LiveTradingEngine:
             qty=abs(self.inventory),
             tag="stop_loss",
         )
+
+    def _mark_analytics_event(self, reason: str) -> None:
+        self._last_analytics_event_reason = reason
 
     def _cancel_all_resting_orders(self) -> None:
         now = time.time()
