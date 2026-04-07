@@ -102,6 +102,10 @@ class LiveTradingEngine:
 
         self.initial_capital = 500_000_000.0
         self.current_equity = self.initial_capital
+        # Reconciliation anchor: local equity is computed as
+        # rest_equity_anchor + realized_since_recon + (current_unrealized - unrealized_anchor).
+        self.rest_equity_anchor = self.initial_capital
+        self.unrealized_anchor = 0.0
         self.kill_switch_equity = 400_000_000.0
         self.stop_loss_points = float(os.getenv("PAPERBROKER_STOP_LOSS_POINTS", "10.0"))
         self.trading_halted = False
@@ -723,23 +727,11 @@ class LiveTradingEngine:
             print("-" * 40 + "\n")
 
     def _rebase_equity(self, true_equity: float) -> None:
-        """Align internal PnL baseline to the latest broker-reported equity."""
-        unrealized = 0.0
-        if self.inventory != 0 and self.avg_entry_price is not None and self.last_price is not None:
-            if self.inventory > 0:
-                unrealized = (
-                    (self.last_price - self.avg_entry_price)
-                    * abs(self.inventory)
-                    * self.contract_multiplier
-                )
-            else:
-                unrealized = (
-                    (self.avg_entry_price - self.last_price)
-                    * abs(self.inventory)
-                    * self.contract_multiplier
-                )
+        """Anchor local equity to latest REST value, then continue local MTM from there."""
+        unrealized = self._compute_unrealized_pnl()
 
-        self.initial_capital = float(true_equity) - unrealized
+        self.rest_equity_anchor = float(true_equity)
+        self.unrealized_anchor = unrealized
         self.realized_pnl = 0.0
         self.current_equity = float(true_equity)
 
@@ -1612,6 +1604,8 @@ class LiveTradingEngine:
             return
 
         self.initial_capital = equity_value
+        self.rest_equity_anchor = equity_value
+        self.unrealized_anchor = 0.0
         self.current_equity = equity_value
         print(f"Startup Equity:            {self.current_equity:,.0f} VND")
         print("-" * 40 + "\n")
@@ -1911,6 +1905,12 @@ class LiveTradingEngine:
         return None
 
     def _compute_internal_equity(self) -> float:
+        unrealized = self._compute_unrealized_pnl()
+        unrealized_delta = unrealized - self.unrealized_anchor
+
+        return self.rest_equity_anchor + self.realized_pnl + unrealized_delta
+
+    def _compute_unrealized_pnl(self) -> float:
         unrealized = 0.0
         if self.inventory != 0 and self.avg_entry_price is not None and self.last_price is not None:
             if self.inventory > 0:
@@ -1925,8 +1925,7 @@ class LiveTradingEngine:
                     * abs(self.inventory)
                     * self.contract_multiplier
                 )
-
-        return self.initial_capital + self.realized_pnl + unrealized
+                return unrealized
 
     def _evaluate_kill_switch(self) -> None:
         if self.trading_halted:
