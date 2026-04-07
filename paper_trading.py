@@ -22,7 +22,6 @@ Environment variables used:
 - PAPERBROKER_TICK_SIZE
 - PAPERBROKER_MAX_INVENTORY
 - PAPERBROKER_SPREAD_MULTIPLIER
-- PAPERBROKER_PORTFOLIO_REFRESH_SECONDS
 """
 
 from __future__ import annotations
@@ -48,7 +47,7 @@ from backtesting import PredictiveRSIMarketMaker
 try:
     # Adjust this import path if your SDK exposes classes from a different module.
     from paperbroker.client import PaperBrokerClient
-    from paperbroker.market_data import KafkaMarketDataClient, QuoteSnapshot
+    from paperbroker.market_data import KafkaMarketDataClient
 except ImportError as exc:  # pragma: no cover - runtime dependency
     raise ImportError(
         "Could not import PaperBrokerClient/KafkaMarketDataClient. "
@@ -143,10 +142,6 @@ class LiveTradingEngine:
         self.unresolved_fills: list[dict[str, Any]] = []
         self._unresolved_fills_lock = threading.RLock()
 
-        self.portfolio_refresh_seconds = float(
-            os.getenv("PAPERBROKER_PORTFOLIO_REFRESH_SECONDS", "3")
-        )
-        self._last_portfolio_pull = 0.0
         self._startup_equity_initialized = False
 
         self.reversal_flatten_cooldown_seconds = float(
@@ -228,8 +223,6 @@ class LiveTradingEngine:
         self.market_data_client = self._build_kafka_client()
 
         self._register_fix_events()
-        self._register_market_data_events()
-
     @staticmethod
     def _require_env(name: str) -> str:
         value = os.getenv(name)
@@ -313,9 +306,6 @@ class LiveTradingEngine:
         self.client.on("fix:order:partial_fill", self.on_order_filled)
         self.client.on("fix:order:canceled", self.on_order_canceled)
         self.client.on("fix:order:rejected", self.on_order_rejected)
-
-    def _register_market_data_events(self) -> None:
-        pass  # Handled asynchronously in _run_kafka_consumer
 
     def start(self) -> None:
         print("Starting LiveTradingEngine...")
@@ -510,7 +500,7 @@ class LiveTradingEngine:
                 if completed_side in {"BUY", "SELL"}:
                     self._reset_reversal_flatten_state(completed_side)
 
-        self._refresh_equity(force_pull=False)
+        self._refresh_equity()
         self._evaluate_kill_switch()
 
     def on_quote(self, instrument: str, quote_snapshot: Any) -> None:
@@ -581,7 +571,7 @@ class LiveTradingEngine:
                         for fill in self.unresolved_fills
                         if id(fill) not in resolved_fill_tokens
                     ]
-                self._refresh_equity(force_pull=False)
+                self._refresh_equity()
                 self._evaluate_kill_switch()
                 self._evaluate_stop_loss()
 
@@ -590,7 +580,7 @@ class LiveTradingEngine:
 
             last_processed_price = self.last_price
 
-            self._refresh_equity(force_pull=False)
+            self._refresh_equity()
             self._evaluate_kill_switch()
             self._evaluate_stop_loss()
 
@@ -637,6 +627,10 @@ class LiveTradingEngine:
             if should_flatten_short:
                 if self._has_pending_reversal_flatten("BUY"):
                     continue
+                blocked, msg = self._is_reversal_flatten_retry_blocked("BUY")
+                if blocked:
+                    print(msg)
+                    continue
 
                 print(
                     f"Signal reversal flush: covering short inventory due to RSI {rsi_value:.2f} < 30."
@@ -652,6 +646,10 @@ class LiveTradingEngine:
 
             if should_flatten_long:
                 if self._has_pending_reversal_flatten("SELL"):
+                    continue
+                blocked, msg = self._is_reversal_flatten_retry_blocked("SELL")
+                if blocked:
+                    print(msg)
                     continue
 
                 print(
@@ -1027,7 +1025,7 @@ class LiveTradingEngine:
             print(f"Failed to append analytics history: {exc}")
 
     async def print_dashboard_loop(self) -> None:
-        """Print live status block every 10 seconds until trading is halted."""
+        """Print one-line live status every 10 seconds until trading is halted."""
         while not self.trading_halted:
             await asyncio.sleep(10)
 
@@ -1055,25 +1053,13 @@ class LiveTradingEngine:
                 f"{raw_atr_spread_val:.4f}" if raw_atr_spread_val is not None else "N/A"
             )
 
-            dashboard_str = "\n".join(
-                [
-                    "=" * 52,
-                    "LiveTradingEngine Dashboard",
-                    "=" * 52,
-                    f"Market Price:         {market_price}",
-                    f"Inventory:            {inventory_str}",
-                    f"Equity:               {self.current_equity:,.0f} VND",
-                    f"PnL:                  {pnl:,.0f} VND",
-                    f"Total Trades:         {self.total_trades_executed}",
-                    f"State Heals:          {self.state_heal_count}",
-                    f"RSI(30):              {rsi_str}",
-                    f"ADX(30):              {adx_str}",
-                    f"Raw ATR Spread:       {raw_atr_spread_str}",
-                    f"Dynamic Spread Width: {spread_str}",
-                    "=" * 52,
-                ]
+            dashboard_line = (
+                "[DASH] "
+                f"Px={market_price} | Inv={inventory_str} | Eq={self.current_equity:,.0f} VND "
+                f"| PnL={pnl:,.0f} | T={self.total_trades_executed} | RSI={rsi_str} "
+                f"| ADX={adx_str} | ATRspr={raw_atr_spread_str} | Spr={spread_str}"
             )
-            self._write_log(dashboard_str, is_dashboard=True)
+            self._write_log(dashboard_line, is_dashboard=True)
 
     def _extract_latest_price(self, quote_snapshot: Any) -> Optional[float]:
         if quote_snapshot is None:
@@ -1521,8 +1507,7 @@ class LiveTradingEngine:
                 self.avg_entry_price = None
             return
 
-    def _refresh_equity(self, force_pull: bool) -> None:
-        _ = force_pull
+    def _refresh_equity(self) -> None:
         self.current_equity = self._compute_internal_equity()
 
     def _initialize_startup_equity(self) -> None:
@@ -1566,6 +1551,7 @@ class LiveTradingEngine:
             print("Halting trading to prevent ghost orders and order timeouts.")
             print("-" * 40 + "\n")
 
+            self.trading_halted = True
             self.current_equity = self.initial_capital
             return
 
@@ -2019,13 +2005,6 @@ class LiveTradingEngine:
         else:
             self._place_market_order(side="BUY", qty=abs(self.inventory), tag=reason)
 
-    def _requires_flatten_before_reversal(self, side: str) -> bool:
-        if side == "BUY" and self.inventory < 0:
-            return True
-        if side == "SELL" and self.inventory > 0:
-            return True
-        return False
-
     def _has_pending_reversal_flatten(self, side: str) -> bool:
         side = side.upper()
         with self._inflight_lock:
@@ -2214,18 +2193,6 @@ class LiveTradingEngine:
             if inspect.isawaitable(result):
                 await result
             return
-
-    @staticmethod
-    def _normalize_side(side: Any) -> Optional[str]:
-        if side is None:
-            return None
-
-        raw = str(side).strip().upper()
-        if raw in {"BUY", "B", "1"}:
-            return "BUY"
-        if raw in {"SELL", "S", "2"}:
-            return "SELL"
-        return None
 
     def _normalize_price(self, value: float) -> float:
         if self.tick_size <= 0:
