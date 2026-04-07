@@ -1925,7 +1925,7 @@ class LiveTradingEngine:
                     * abs(self.inventory)
                     * self.contract_multiplier
                 )
-                return unrealized
+        return unrealized
 
     def _evaluate_kill_switch(self) -> None:
         if self.trading_halted:
