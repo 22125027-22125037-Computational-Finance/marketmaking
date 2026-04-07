@@ -990,7 +990,6 @@ class LiveTradingEngine:
         rsi: Optional[float],
         adx: Optional[float],
     ) -> None:
-        event_reason = self._last_analytics_event_reason
         self._last_analytics_event_reason = None
 
         # One-time schema migration for older files that don't have newer analytics columns yet.
@@ -999,43 +998,15 @@ class LiveTradingEngine:
                 existing_header = pd.read_csv(self.analytics_history_path, nrows=0)
                 has_rsi = "rsi" in existing_header.columns
                 has_adx = "adx" in existing_header.columns
-                has_loss_reason = "loss_reason" in existing_header.columns
-                has_is_stoploss = "is_stoploss" in existing_header.columns
-                has_is_kill_switch = "is_kill_switch" in existing_header.columns
-                has_is_reversal_flatten = "is_reversal_flatten" in existing_header.columns
-                has_is_eod_liquidation = "is_eod_liquidation" in existing_header.columns
-                if not (
-                    has_rsi
-                    and has_adx
-                    and has_loss_reason
-                    and has_is_stoploss
-                    and has_is_kill_switch
-                    and has_is_reversal_flatten
-                    and has_is_eod_liquidation
-                ):
+                if not (has_rsi and has_adx):
                     existing_history = pd.read_csv(self.analytics_history_path)
                     if "rsi" not in existing_history.columns:
                         existing_history["rsi"] = pd.NA
                     if "adx" not in existing_history.columns:
                         existing_history["adx"] = pd.NA
-                    if "loss_reason" not in existing_history.columns:
-                        existing_history["loss_reason"] = pd.NA
-                    if "is_stoploss" not in existing_history.columns:
-                        existing_history["is_stoploss"] = 0
-                    if "is_kill_switch" not in existing_history.columns:
-                        existing_history["is_kill_switch"] = 0
-                    if "is_reversal_flatten" not in existing_history.columns:
-                        existing_history["is_reversal_flatten"] = 0
-                    if "is_eod_liquidation" not in existing_history.columns:
-                        existing_history["is_eod_liquidation"] = 0
                     existing_history.to_csv(self.analytics_history_path, index=False)
             except Exception as exc:
                 print(f"Failed to migrate analytics history schema: {exc}")
-
-        is_stoploss = 1 if event_reason == "stop_loss" else 0
-        is_kill_switch = 1 if event_reason == "kill_switch" else 0
-        is_reversal_flatten = 1 if event_reason == "reversal_flatten" else 0
-        is_eod_liquidation = 1 if event_reason in {"morning_liquidation", "eod_liquidation"} else 0
 
         record = pd.DataFrame(
             [
@@ -1047,11 +1018,6 @@ class LiveTradingEngine:
                     "elapsed_seconds": float(elapsed_seconds),
                     "rsi": float(rsi) if rsi is not None else None,
                     "adx": float(adx) if adx is not None else None,
-                    "loss_reason": event_reason,
-                    "is_stoploss": is_stoploss,
-                    "is_kill_switch": is_kill_switch,
-                    "is_reversal_flatten": is_reversal_flatten,
-                    "is_eod_liquidation": is_eod_liquidation,
                 }
             ]
         )
