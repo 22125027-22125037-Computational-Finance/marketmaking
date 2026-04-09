@@ -110,6 +110,9 @@ class LiveTradingEngine:
         self.trading_halted = False
         self.midday_break_active = False
         self._last_morning_liquidation_date: Optional[datetime.date] = None
+        self.morning_flatten_start = self._parse_time_env(
+            "PAPERBROKER_MORNING_FLATTEN_START", dt_time(hour=11, minute=29, second=30)
+        )
 
         #self.fee_per_contract = 40_000.0  # 0.4 points * 100,000 multiplier
         #temporary disable fee to better visualize PnL in paper trading. Remember to re-enable for realistic backtesting.
@@ -254,6 +257,29 @@ class LiveTradingEngine:
         if hasattr(obj, "__dict__"):
             return vars(obj)
         return {}
+
+    @staticmethod
+    def _parse_time_env(env_name: str, default_value: dt_time) -> dt_time:
+        raw_value = os.getenv(env_name)
+        if not raw_value:
+            return default_value
+
+        try:
+            parts = [int(part) for part in raw_value.strip().split(":")]
+            if len(parts) == 2:
+                hour, minute = parts
+                second = 0
+            elif len(parts) == 3:
+                hour, minute, second = parts
+            else:
+                raise ValueError("Expected HH:MM or HH:MM:SS")
+            return dt_time(hour=hour, minute=minute, second=second)
+        except Exception:
+            print(
+                f"Invalid {env_name}={raw_value!r}. "
+                f"Using default {default_value.strftime('%H:%M:%S')}."
+            )
+            return default_value
 
     def _build_fix_client(self) -> Any:
         project_dir = os.path.dirname(os.path.abspath(__file__))
@@ -842,7 +868,7 @@ class LiveTradingEngine:
 
     async def _eod_liquidation_loop(self) -> None:
         """Risk controls for morning break and end-of-day boundaries (GMT+7)."""
-        morning_liquidation_start = dt_time(hour=11, minute=29, second=30)
+        morning_liquidation_start = self.morning_flatten_start
         morning_liquidation_end = dt_time(hour=11, minute=30, second=0)
         afternoon_session_start = dt_time(hour=13, minute=0, second=0)
         afternoon_liquidation_start = dt_time(hour=14, minute=29, second=30)
@@ -863,15 +889,18 @@ class LiveTradingEngine:
                 and self._last_morning_liquidation_date != now_date
             ):
                 print("\n" + "#" * 90)
-                print("CRITICAL MORNING SESSION LIQUIDATION TRIGGERED (11:29:30-11:30:00 GMT+7)")
+                print(
+                    "CRITICAL MORNING SESSION LIQUIDATION TRIGGERED "
+                    f"({morning_liquidation_start.strftime('%H:%M:%S')}-11:30:00 GMT+7)"
+                )
                 print("Canceling all resting orders and flattening inventory before midday break.")
                 print("#" * 90 + "\n")
 
                 self._last_morning_liquidation_date = now_date
-                self.midday_break_active = True
                 self._mark_analytics_event("morning_liquidation")
                 self._cancel_all_resting_orders()
                 self._flatten_inventory_market(reason="morning_liquidation")
+                self.midday_break_active = True
                 continue
 
             if morning_liquidation_end <= now_local < afternoon_session_start:
@@ -892,6 +921,16 @@ class LiveTradingEngine:
                 print("Restarting quote placement and strategy loops automatically.")
                 print("#" * 90 + "\n")
                 self.midday_break_active = False
+                # Start afternoon session with fresh indicator display values.
+                self.latest_indicators["rsi"] = None
+                self.latest_indicators["adx"] = None
+                self._initialize_startup_position()
+                true_equity = self._pull_equity_from_portfolio()
+                if true_equity is not None:
+                    self._rebase_equity(true_equity)
+                    print(f"Afternoon Equity Re-sync: {self.current_equity:,.0f} VND")
+                else:
+                    print("Afternoon Equity Re-sync: FAILED TO PULL")
 
             if afternoon_liquidation_start <= now_local < afternoon_liquidation_end:
                 print("\n" + "#" * 90)
@@ -1028,6 +1067,10 @@ class LiveTradingEngine:
         """Print one-line live status every 10 seconds until trading is halted."""
         while not self.trading_halted:
             await asyncio.sleep(10)
+
+            # Keep midday break quiet even if market data continues flowing.
+            if self.midday_break_active or self._is_midday_break():
+                continue
 
             market_price = (
                 f"{self.last_price:,.2f}" if self.last_price is not None else "N/A"
@@ -1301,6 +1344,10 @@ class LiveTradingEngine:
             return False
 
     def _place_limit_order(self, side: str, qty: int, price: float) -> str:
+        # Hard lunch-break lock: do not submit any new orders in this window.
+        if self._is_midday_break():
+            return ""
+
         try:
             cl_ord_id = self.client.place_order(
                 full_symbol=self.symbol,
@@ -1316,6 +1363,10 @@ class LiveTradingEngine:
 
     def _place_market_order(self, side: str, qty: int, tag: str = "") -> str:
         if qty <= 0 or self.last_price is None:
+            return ""
+
+        # Hard lunch-break lock: do not submit any new orders in this window.
+        if self._is_midday_break():
             return ""
 
         # Exchange rejects OrdType=MARKET, so emulate with an aggressive LIMIT.
