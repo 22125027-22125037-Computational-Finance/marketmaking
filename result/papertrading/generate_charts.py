@@ -87,10 +87,13 @@ def save_line_chart(
     fig.tight_layout()
     fig.savefig(output_file, format="svg")
     plt.close(fig)
+    print(f"Saved {output_file}")
 
 
 def main() -> None:
+    print(f"Loading data from {CSV_PATH}...")
     df, spans, _ = load_and_prepare_data(CSV_PATH)
+    print(f"Loaded {len(df)} rows. Generating charts...")
 
     save_line_chart(
         df=df,
@@ -133,6 +136,8 @@ def main() -> None:
         percent_axis=True,
         line_color="#6A4C93",
     )
+
+    print("Done.")
 
 
 if __name__ == "__main__":
