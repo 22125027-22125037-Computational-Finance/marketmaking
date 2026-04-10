@@ -39,7 +39,6 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
 from backtesting import PredictiveRSIMarketMaker
@@ -194,11 +193,6 @@ class LiveTradingEngine:
         self.analytics_refresh_seconds = float(
             os.getenv("PAPERBROKER_ANALYTICS_SECONDS", "10")
         )
-        self.analytics_chart_save_every = max(
-            1,
-            int(os.getenv("PAPERBROKER_ANALYTICS_CHART_SAVE_EVERY", "6")),
-        )
-        self._pending_snapshots_since_chart = 0
         self.reconciliation_probe_trade_count = (
             os.getenv("PAPERBROKER_RECON_PROBE_TRADE_COUNT", "1").strip().lower()
             not in {"0", "false", "no"}
@@ -393,8 +387,6 @@ class LiveTradingEngine:
                 eod_task,
             )
         finally:
-            if self.analytics_timestamps:
-                self._save_analytics_charts()
             await self.stop_async()
 
     async def stop_async(self) -> None:
@@ -744,8 +736,6 @@ class LiveTradingEngine:
                 self._rebase_equity(true_equity)
                 print(f"Reconciled Equity:       {self.current_equity:,.0f} VND")
                 self._record_analytics_snapshot()
-                self._save_analytics_charts()
-                self._pending_snapshots_since_chart = 0
             else:
                 print("Reconciled Equity:       FAILED TO PULL")
             print("-" * 40 + "\n")
@@ -792,79 +782,6 @@ class LiveTradingEngine:
             rsi=self.analytics_rsi[-1],
             adx=self.analytics_adx[-1],
         )
-
-    def _save_analytics_charts(self) -> None:
-        if not self.analytics_timestamps:
-            return
-
-        result_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "result",
-            "papertrading",
-        )
-        os.makedirs(result_dir, exist_ok=True)
-
-        elapsed_index = pd.Series(self.analytics_elapsed_seconds, dtype="float64")
-
-        equity_series = pd.Series(self.analytics_equity, index=elapsed_index)
-        price_series = pd.Series(self.analytics_price, index=elapsed_index)
-        inventory_series = pd.Series(self.analytics_inventory, index=elapsed_index)
-
-        hpr = equity_series / float(self.initial_capital) if self.initial_capital else equity_series
-        rolling_max = equity_series.cummax()
-        drawdown = (equity_series - rolling_max) / rolling_max.replace(0.0, pd.NA)
-        single_point = len(equity_series) <= 1
-        marker = "o" if single_point else None
-
-        plt.figure(figsize=(10, 6))
-        plt.plot(hpr.index, hpr.values, color="black", label="HPR", marker=marker)
-        plt.title("Holding Period Return (Paper Trading)")
-        plt.xlabel("Elapsed Trading Seconds")
-        plt.ylabel("HPR")
-        plt.grid(True)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(result_dir, "hpr.svg"), dpi=300)
-        plt.close()
-
-        plt.figure(figsize=(10, 6))
-        plt.plot(drawdown.index, drawdown.values, color="black", label="Drawdown", marker=marker)
-        plt.title("Drawdown (Paper Trading)")
-        plt.xlabel("Elapsed Trading Seconds")
-        plt.ylabel("Drawdown")
-        plt.grid(True)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(result_dir, "drawdown.svg"), dpi=300)
-        plt.close()
-
-        plt.figure(figsize=(10, 6))
-        plt.plot(
-            inventory_series.index,
-            inventory_series.values,
-            color="black",
-            label="Inventory",
-            marker=marker,
-        )
-        plt.title("Inventory Over Time (Paper Trading)")
-        plt.xlabel("Elapsed Trading Seconds")
-        plt.ylabel("Contracts")
-        plt.grid(True)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(result_dir, "inventory.svg"), dpi=300)
-        plt.close()
-
-        plt.figure(figsize=(10, 6))
-        plt.plot(price_series.index, price_series.values, color="black", label="Price", marker=marker)
-        plt.title("Price Over Time (Paper Trading)")
-        plt.xlabel("Elapsed Trading Seconds")
-        plt.ylabel("Price")
-        plt.grid(True)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(result_dir, "price.svg"), dpi=300)
-        plt.close()
 
     async def _eod_liquidation_loop(self) -> None:
         """Risk controls for morning break and end-of-day boundaries (GMT+7)."""
@@ -967,10 +884,6 @@ class LiveTradingEngine:
                 continue
 
             self._record_analytics_snapshot()
-            self._pending_snapshots_since_chart += 1
-            if self._pending_snapshots_since_chart >= self.analytics_chart_save_every:
-                self._save_analytics_charts()
-                self._pending_snapshots_since_chart = 0
 
     def _load_analytics_history(self) -> None:
         if not os.path.exists(self.analytics_history_path):
